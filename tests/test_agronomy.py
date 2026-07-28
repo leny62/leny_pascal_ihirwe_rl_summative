@@ -57,24 +57,71 @@ def test_harvest_index_penalised_by_flowering_stress():
     assert ag.harvest_index(1.0) < ag.harvest_index(0.5) < ag.harvest_index(0.0)
 
 
-@pytest.mark.skip(reason="needs step_zone")
+def a_zone(**overrides) -> ag.ZoneState:
+    base = dict(
+        index=1,
+        soil_depth_m=1.0,
+        depletion_mm=30.0,
+        canopy_cover=0.4,
+        biomass_g_m2=100.0,
+        nitrogen_kg_ha=40.0,
+        pest_pressure=0.1,
+        weed_pressure=0.1,
+        pest_damage=0.0,
+    )
+    base.update(overrides)
+    return ag.ZoneState(**base)
+
+
 def test_water_balance_closes():
-    """Inputs minus outputs minus storage change under 1e-6 mm per step."""
-    raise NotImplementedError
+    """Storage change equals inputs minus outputs, to under 1e-6 mm."""
+    zone = a_zone(depletion_mm=25.0)
+    new, f = ag.step_zone(
+        zone, rain_mm=8.0, run_on_mm=3.0, irrigation_mm=10.0, et0_mm=4.5,
+        t_max=27.0, t_min=16.0, humidity=0.6, gdd_cum=300.0, day=40,
+    )
+    storage_change = zone.depletion_mm - new.depletion_mm
+    balance = f["infiltration_mm"] - f["etc_mm"] - f["deep_percolation_mm"]
+    assert abs(storage_change - balance) < 1e-6
 
 
-@pytest.mark.skip(reason="needs step_zone")
 def test_runoff_cascade_conserves_water():
-    """What leaves zone z arrives at z+1 or leaves the block, never both."""
-    raise NotImplementedError
+    runoffs = np.array([12.0, 8.0, 5.0, 3.0])
+    run_on, left = ag.cascade_runoff(runoffs)
+    assert run_on[0] == 0.0
+    assert abs(runoffs.sum() - (run_on.sum() + left)) < 1e-9
+    # Each upper zone routes exactly the downslope fraction to the bench below.
+    for z in range(len(runoffs) - 1):
+        assert run_on[z + 1] == pytest.approx(ag.RUNOFF_ROUTED_DOWNSLOPE * runoffs[z])
 
 
-@pytest.mark.skip(reason="needs nitrogen_fixation")
 def test_fixation_shuts_off_as_mineral_nitrogen_rises():
     """The reason a heavy urea dose is doubly wasteful."""
-    raise NotImplementedError
+    low = ag.nitrogen_fixation(0.5, nitrogen_kg_ha=5.0, ks=1.0)
+    high = ag.nitrogen_fixation(0.5, nitrogen_kg_ha=55.0, ks=1.0)
+    assert low > high
+    assert ag.nitrogen_fixation(0.5, ag.N_FIXATION_SUPPRESS, ks=1.0) == pytest.approx(0.0)
+    # No nodulation before the crop establishes root nodules.
+    assert ag.nitrogen_fixation(0.05, nitrogen_kg_ha=5.0, ks=1.0) == 0.0
 
 
-@pytest.mark.skip(reason="needs potential_canopy_cover")
 def test_canopy_cover_stays_within_bounds():
-    raise NotImplementedError
+    zone = a_zone(canopy_cover=0.02, biomass_g_m2=0.0)
+    gdd = 0.0
+    for day in range(120):
+        gdd += ag.growing_degree_days(27.0, 16.0)
+        zone, _ = ag.step_zone(
+            zone, rain_mm=5.0, run_on_mm=0.0, irrigation_mm=6.0, et0_mm=4.0,
+            t_max=27.0, t_min=16.0, humidity=0.6, gdd_cum=gdd, day=day,
+        )
+        assert 0.0 <= zone.canopy_cover <= ag.CC_MAX
+
+
+def test_deep_percolation_only_when_water_exceeds_demand():
+    """A dry soil taking less water than it evaporates should not percolate."""
+    zone = a_zone(depletion_mm=60.0)
+    _, f = ag.step_zone(
+        zone, rain_mm=1.0, run_on_mm=0.0, irrigation_mm=0.0, et0_mm=5.0,
+        t_max=28.0, t_min=15.0, humidity=0.5, gdd_cum=200.0, day=30,
+    )
+    assert f["deep_percolation_mm"] == 0.0

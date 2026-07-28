@@ -66,8 +66,29 @@ class BlockLedger:
 
     def totals(self) -> dict[str, float]:
         """Season aggregates for the audit record."""
-        # TODO: sum water_mm, nitrogen_kg, labour_days, sprays, yield_kg from events
-        raise NotImplementedError
+        totals = {
+            "water_mm": 0.0,
+            "nitrogen_kg_ha": 0.0,
+            "potash_kg_ha": 0.0,
+            "sprays": 0,
+            "weeding_events": 0,
+            "harvest_revenue_krwf": 0.0,
+        }
+        for event in self.events:
+            action, qty = event.get("action"), event.get("quantity", 0.0) or 0.0
+            if action == "irrigate":
+                totals["water_mm"] += qty
+            elif action == "apply_n":
+                totals["nitrogen_kg_ha"] += qty
+            elif action == "apply_k":
+                totals["potash_kg_ha"] += qty
+            elif action == "spray_biopesticide":
+                totals["sprays"] += 1
+            elif action == "hire_weeding_crew":
+                totals["weeding_events"] += 1
+            elif action == "harvest":
+                totals["harvest_revenue_krwf"] += qty
+        return totals
 
     def to_dict(self) -> dict[str, Any]:
         return {

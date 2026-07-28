@@ -9,7 +9,14 @@ import numpy as np
 import pytest
 
 import environment  # noqa: F401  registers Umurima-v0
-from environment.custom_env import HORIZON, OBS_DIM, Action
+from environment.custom_env import (
+    HORIZON,
+    N_ZONES,
+    OBS_DIM,
+    Z_DEPLETION,
+    ZONE_STRIDE,
+    Action,
+)
 
 
 def _env_is_implemented() -> bool:
@@ -69,30 +76,62 @@ def test_observations_stay_inside_the_declared_box():
             break
 
 
-def test_random_rollouts_hit_every_termination_cause():
-    """Rubric asks the agent to explore edge cases, so they must be reachable."""
-    causes = set()
+def _run(env, policy, seed):
+    """Roll a callable policy to episode end, return the final info."""
+    obs, _ = env.reset(seed=seed)
+    while True:
+        obs, _, terminated, truncated, info = env.step(policy(obs))
+        if terminated or truncated:
+            return info
+
+
+def _keep_alive(obs: np.ndarray) -> int:
+    """Irrigate whenever any bench is drying, never harvest. Reaches the horizon
+    with the crop still standing, which is what truncation means here."""
+    depletion = [obs[z * ZONE_STRIDE + Z_DEPLETION] for z in range(N_ZONES)]
+    return int(Action.IRRIGATE_ALL_LIGHT) if max(depletion) > 0.35 else int(Action.IDLE)
+
+
+def _causes_over_seeds(env, policy, seeds):
+    return {_run(env, policy, s)["termination_cause"] for s in seeds}
+
+
+def test_all_termination_causes_are_reachable():
+    """The rubric wants the agent to explore edge cases, so each ending must be
+    reachable. Pure random almost always harvests early, so reachability is shown
+    with targeted policies. Spend-rate against opening cash is seed dependent, so
+    each cause is checked for presence across a seed range, not on one seed."""
     env = gym.make("Umurima-v0")
-    for seed in range(1000):
-        env.reset(seed=seed)
-        while True:
-            _, _, terminated, truncated, info = env.step(env.action_space.sample())
-            if terminated or truncated:
-                causes.add(info.get("termination_cause", "truncated"))
-                break
-    assert {"harvested", "crop_failure", "insolvency", "truncated"} <= causes
+    from training.baselines import ScriptedAgronomist
+
+    scripted = ScriptedAgronomist()
+    seeds = range(30)
+
+    assert "harvested" in _causes_over_seeds(env, lambda o: scripted.predict(o)[0], seeds)
+    assert "crop_failure" in _causes_over_seeds(env, lambda o: int(Action.IDLE), seeds)
+    # Applying nitrogen every day is the fastest way to burn working capital.
+    assert "insolvency" in _causes_over_seeds(env, lambda o: int(Action.APPLY_N_SPLIT), seeds)
+
+
+def test_random_rollouts_run_without_error():
+    """Robustness: many random episodes, no exception, every episode ends."""
+    env = gym.make("Umurima-v0")
+    for seed in range(300):
+        info = _run(env, lambda o: env.action_space.sample(), seed)
+        assert "termination_cause" in info
 
 
 def test_truncation_is_not_reported_as_termination():
     """PPO and A2C bootstrap differently on the two. Collapsing them is a silent bug."""
     env = gym.make("Umurima-v0")
-    env.reset(seed=7)
+    obs, _ = env.reset(seed=7)
+    terminated = truncated = False
     for _ in range(HORIZON):
-        _, _, terminated, truncated, _ = env.step(Action.IDLE)
-        if truncated:
-            assert not terminated
-            return
-    pytest.fail("idling for the full horizon should truncate")
+        obs, _, terminated, truncated, _ = env.step(_keep_alive(obs))
+        if terminated or truncated:
+            break
+    assert truncated
+    assert not terminated
 
 
 def test_scripted_agronomist_beats_random():
