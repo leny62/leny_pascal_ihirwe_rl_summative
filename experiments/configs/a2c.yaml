@@ -1,0 +1,21 @@
+# A2C hyperparameter grid
+algo: a2c
+script: training/pg_training.py
+defaults:
+  timesteps: 400000
+  seed: 0
+  n_envs: 8
+  net_arch: [256, 256]
+  max_grad_norm: 0.5
+
+runs:
+  - {id: a2c-01, lr: 7.0e-4, gamma: 0.99,  n_steps: 5,  ent_coef: 0.00, vf_coef: 0.50, use_rms_prop: true,  note: "SB3 default baseline"}
+  - {id: a2c-02, lr: 3.0e-4, gamma: 0.99,  n_steps: 5,  ent_coef: 0.00, vf_coef: 0.50, use_rms_prop: true,  note: "lower lr"}
+  - {id: a2c-03, lr: 1.0e-3, gamma: 0.99,  n_steps: 5,  ent_coef: 0.00, vf_coef: 0.50, use_rms_prop: true,  note: "higher lr"}
+  - {id: a2c-04, lr: 7.0e-4, gamma: 0.99,  n_steps: 16, ent_coef: 0.00, vf_coef: 0.50, use_rms_prop: true,  note: "longer rollout, less biased returns"}
+  - {id: a2c-05, lr: 7.0e-4, gamma: 0.99,  n_steps: 64, ent_coef: 0.00, vf_coef: 0.50, use_rms_prop: true,  note: "much longer rollout, approaching PPO"}
+  - {id: a2c-06, lr: 7.0e-4, gamma: 0.99,  n_steps: 16, ent_coef: 0.01, vf_coef: 0.50, use_rms_prop: true,  note: "entropy bonus"}
+  - {id: a2c-07, lr: 7.0e-4, gamma: 0.99,  n_steps: 16, ent_coef: 0.05, vf_coef: 0.50, use_rms_prop: true,  note: "heavy entropy, expect no commitment"}
+  - {id: a2c-08, lr: 7.0e-4, gamma: 0.99,  n_steps: 16, ent_coef: 0.01, vf_coef: 0.25, use_rms_prop: true,  note: "weaker critic weighting"}
+  - {id: a2c-09, lr: 7.0e-4, gamma: 0.99,  n_steps: 16, ent_coef: 0.01, vf_coef: 0.50, use_rms_prop: false, note: "Adam instead of RMSProp"}
+  - {id: a2c-10, lr: 7.0e-4, gamma: 0.995, n_steps: 16, ent_coef: 0.01, vf_coef: 0.50, use_rms_prop: false, max_grad_norm: 0.3, note: "tighter gradient clipping"}

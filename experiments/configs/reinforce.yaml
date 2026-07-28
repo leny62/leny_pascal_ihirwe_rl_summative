@@ -1,0 +1,20 @@
+# REINFORCE hyperparameter grid. Custom implementation, training/reinforce.py
+algo: reinforce
+script: training/pg_training.py
+defaults:
+  timesteps: 400000
+  seed: 0
+  n_envs: 1
+  net_arch: [256, 256]
+
+runs:
+  - {id: rf-01, lr: 1.0e-3, gamma: 0.99, baseline: none,  ent_coef: 0.00, episodes_per_update: 1, normalise_advantage: false, note: "textbook REINFORCE, expect high variance"}
+  - {id: rf-02, lr: 1.0e-3, gamma: 0.99, baseline: value, ent_coef: 0.00, episodes_per_update: 1, normalise_advantage: false, note: "learned baseline cuts variance"}
+  - {id: rf-03, lr: 3.0e-4, gamma: 0.99, baseline: value, ent_coef: 0.00, episodes_per_update: 1, normalise_advantage: false, note: "lower lr, smoother but slower"}
+  - {id: rf-04, lr: 3.0e-3, gamma: 0.99, baseline: value, ent_coef: 0.00, episodes_per_update: 1, normalise_advantage: false, note: "too high, expect divergence"}
+  - {id: rf-05, lr: 1.0e-3, gamma: 0.95, baseline: value, ent_coef: 0.00, episodes_per_update: 1, normalise_advantage: false, note: "myopic on a terminal-reward task"}
+  - {id: rf-06, lr: 1.0e-3, gamma: 1.00, baseline: value, ent_coef: 0.00, episodes_per_update: 1, normalise_advantage: false, note: "undiscounted, maximum variance"}
+  - {id: rf-07, lr: 1.0e-3, gamma: 0.99, baseline: value, ent_coef: 0.01, episodes_per_update: 1, normalise_advantage: false, note: "mild entropy bonus delays collapse"}
+  - {id: rf-08, lr: 1.0e-3, gamma: 0.99, baseline: value, ent_coef: 0.05, episodes_per_update: 1, normalise_advantage: false, note: "strong entropy, expect no commitment"}
+  - {id: rf-09, lr: 1.0e-3, gamma: 0.99, baseline: value, ent_coef: 0.01, episodes_per_update: 8, normalise_advantage: false, note: "batching episodes cuts gradient variance"}
+  - {id: rf-10, lr: 1.0e-3, gamma: 0.99, baseline: value, ent_coef: 0.01, episodes_per_update: 8, normalise_advantage: true,  note: "normalised advantages, expect best of ten"}

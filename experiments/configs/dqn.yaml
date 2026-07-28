@@ -1,0 +1,21 @@
+# DQN hyperparameter grid. The note field on each row is the hypothesis it tests.
+algo: dqn
+script: training/dqn_training.py
+defaults:
+  timesteps: 400000
+  seed: 0
+  learning_starts: 10000
+  train_freq: 4
+  net_arch: [256, 256]
+
+runs:
+  - {id: dqn-01, lr: 1.0e-4, gamma: 0.99,  buffer_size: 100000, batch_size: 64,  exploration_fraction: 0.20, exploration_final_eps: 0.05, target_update_interval: 1000, note: "baseline"}
+  - {id: dqn-02, lr: 5.0e-4, gamma: 0.99,  buffer_size: 100000, batch_size: 64,  exploration_fraction: 0.20, exploration_final_eps: 0.05, target_update_interval: 1000, note: "high lr destabilises the Q target"}
+  - {id: dqn-03, lr: 5.0e-5, gamma: 0.99,  buffer_size: 100000, batch_size: 64,  exploration_fraction: 0.20, exploration_final_eps: 0.05, target_update_interval: 1000, note: "low lr underfits inside the budget"}
+  - {id: dqn-04, lr: 1.0e-4, gamma: 0.95,  buffer_size: 100000, batch_size: 64,  exploration_fraction: 0.20, exploration_final_eps: 0.05, target_update_interval: 1000, note: "myopic discount ignores terminal revenue"}
+  - {id: dqn-05, lr: 1.0e-4, gamma: 0.999, buffer_size: 100000, batch_size: 64,  exploration_fraction: 0.20, exploration_final_eps: 0.05, target_update_interval: 1000, note: "long horizon credit assignment"}
+  - {id: dqn-06, lr: 1.0e-4, gamma: 0.99,  buffer_size: 20000,  batch_size: 64,  exploration_fraction: 0.20, exploration_final_eps: 0.05, target_update_interval: 1000, note: "small buffer, correlated samples"}
+  - {id: dqn-07, lr: 1.0e-4, gamma: 0.99,  buffer_size: 500000, batch_size: 64,  exploration_fraction: 0.20, exploration_final_eps: 0.05, target_update_interval: 1000, note: "large buffer, stale off-policy data"}
+  - {id: dqn-08, lr: 1.0e-4, gamma: 0.99,  buffer_size: 100000, batch_size: 256, exploration_fraction: 0.20, exploration_final_eps: 0.05, target_update_interval: 5000, note: "big batch, slow target, max stability"}
+  - {id: dqn-09, lr: 1.0e-4, gamma: 0.99,  buffer_size: 100000, batch_size: 64,  exploration_fraction: 0.50, exploration_final_eps: 0.10, target_update_interval: 1000, note: "sustained exploration to discover SCOUT"}
+  - {id: dqn-10, lr: 1.0e-4, gamma: 0.99,  buffer_size: 100000, batch_size: 128, exploration_fraction: 0.30, exploration_final_eps: 0.05, target_update_interval: 2000, learning_starts: 20000, net_arch: [512, 512, 256], note: "more capacity, later learning start"}

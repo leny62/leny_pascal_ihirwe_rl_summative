@@ -1,0 +1,21 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+build/
+dist/
+
+# Training artefacts. Trained policies are tracked, raw run output is not.
+logs/**/tensorboard/
+logs/**/*.csv
+!logs/.gitkeep
+runs/
+*.pkl
+
+# Rendered captures
+assets/captures/
+*.mp4
+
+.pytest_cache/
+.ruff_cache/
+.ipynb_checkpoints/

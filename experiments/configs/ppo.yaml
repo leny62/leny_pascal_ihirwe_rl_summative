@@ -1,0 +1,22 @@
+# PPO hyperparameter grid
+algo: ppo
+script: training/pg_training.py
+defaults:
+  timesteps: 400000
+  seed: 0
+  n_envs: 8
+  net_arch: [256, 256]
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+
+runs:
+  - {id: ppo-01, lr: 3.0e-4, gamma: 0.99,  n_steps: 2048, batch_size: 64,  n_epochs: 10, clip_range: 0.2, gae_lambda: 0.95, ent_coef: 0.00, note: "baseline"}
+  - {id: ppo-02, lr: 1.0e-4, gamma: 0.99,  n_steps: 2048, batch_size: 64,  n_epochs: 10, clip_range: 0.2, gae_lambda: 0.95, ent_coef: 0.00, note: "conservative lr"}
+  - {id: ppo-03, lr: 1.0e-3, gamma: 0.99,  n_steps: 2048, batch_size: 64,  n_epochs: 10, clip_range: 0.2, gae_lambda: 0.95, ent_coef: 0.00, note: "aggressive lr"}
+  - {id: ppo-04, lr: 3.0e-4, gamma: 0.99,  n_steps: 2048, batch_size: 64,  n_epochs: 10, clip_range: 0.1, gae_lambda: 0.95, ent_coef: 0.00, note: "tight clip, small trust region"}
+  - {id: ppo-05, lr: 3.0e-4, gamma: 0.99,  n_steps: 2048, batch_size: 64,  n_epochs: 10, clip_range: 0.3, gae_lambda: 0.95, ent_coef: 0.00, note: "loose clip, larger policy jumps"}
+  - {id: ppo-06, lr: 3.0e-4, gamma: 0.99,  n_steps: 512,  batch_size: 64,  n_epochs: 10, clip_range: 0.2, gae_lambda: 0.95, ent_coef: 0.00, note: "rollout shorter than one episode"}
+  - {id: ppo-07, lr: 3.0e-4, gamma: 0.99,  n_steps: 4096, batch_size: 128, n_epochs: 10, clip_range: 0.2, gae_lambda: 0.95, ent_coef: 0.00, note: "long rollout, several episodes"}
+  - {id: ppo-08, lr: 3.0e-4, gamma: 0.99,  n_steps: 2048, batch_size: 64,  n_epochs: 20, clip_range: 0.2, gae_lambda: 0.95, ent_coef: 0.00, note: "over-optimising each batch"}
+  - {id: ppo-09, lr: 3.0e-4, gamma: 0.99,  n_steps: 2048, batch_size: 64,  n_epochs: 10, clip_range: 0.2, gae_lambda: 0.95, ent_coef: 0.01, note: "entropy bonus sustains exploration"}
+  - {id: ppo-10, lr: 3.0e-4, gamma: 0.995, n_steps: 2048, batch_size: 64,  n_epochs: 10, clip_range: 0.2, gae_lambda: 0.80, ent_coef: 0.01, note: "shorter GAE, longer discount"}
