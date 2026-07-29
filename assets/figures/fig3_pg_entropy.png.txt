@@ -1,0 +1,1 @@
+REINFORCE policy entropy over the course of training. The dashed line marks the entropy of a uniform policy over 18 actions (ln(18) = 2.890 nats). Low entropy coefficients lead to rapid entropy collapse; higher values sustain exploration longer. PPO and A2C entropy is not logged by the Stable-Baselines3 Monitor wrapper and is therefore not shown.

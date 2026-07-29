@@ -13,10 +13,12 @@ import argparse
 from pathlib import Path
 
 MODEL_SEARCH_ORDER = [
-    Path("models/pg/ppo_best.zip"),
-    Path("models/pg/a2c_best.zip"),
-    Path("models/pg/reinforce_best.pt"),
-    Path("models/dqn/dqn_best.zip"),
+    Path("models/ppo/ppo-06.zip"),
+    Path("models/ppo/ppo-05.zip"),
+    Path("models/ppo/ppo-01.zip"),
+    Path("models/reinforce/rf-09.pt"),
+    Path("models/dqn/dqn-07.zip"),
+    Path("models/a2c/a2c-06.zip"),
 ]
 
 
@@ -31,20 +33,27 @@ def main() -> None:
     p.add_argument("--no-render", action="store_true")
     args = p.parse_args()
 
-    from play import run_episodes  # keeps main.py importable without a GL context
+    from play import run_episodes
 
     model_path = find_model()
     if model_path is None:
         print("No trained model found, falling back to the scripted agronomist.")
         print("Train one with: uv run training/pg_training.py --algo ppo --run-name ppo-01")
-
-    run_episodes(
-        model_path=model_path,
-        episodes=args.episodes,
-        seed=args.seed,
-        render=not args.no_render,
-        verbose=True,
-    )
+        run_episodes(
+            baseline="scripted",
+            episodes=args.episodes,
+            seed=args.seed,
+            render=not args.no_render,
+            verbose=True,
+        )
+    else:
+        run_episodes(
+            model_path=model_path,
+            episodes=args.episodes,
+            seed=args.seed,
+            render=not args.no_render,
+            verbose=True,
+        )
 
 
 if __name__ == "__main__":

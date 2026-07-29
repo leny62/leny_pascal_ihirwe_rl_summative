@@ -1,0 +1,1 @@
+Generalisation: train-distribution mean return (30 seeds) against held-out mean return (100 seeds drawn from a disjoint seed range). Points on the identity line generalise perfectly. Negative outliers are labelled with their run ID.
