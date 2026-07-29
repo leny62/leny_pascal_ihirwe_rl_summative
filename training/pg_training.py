@@ -10,6 +10,19 @@ from __future__ import annotations
 
 import argparse
 
+from stable_baselines3 import A2C, PPO
+
+from training.common import (
+    LOG_ROOT,
+    MODEL_ROOT,
+    dump_config,
+    evaluate_both,
+    limit_threads,
+    make_env,
+    make_vec_env,
+)
+from training.reinforce import ReinforceConfig, train_reinforce
+
 ALGOS = ("reinforce", "ppo", "a2c")
 
 
@@ -43,11 +56,111 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _build_sb3(args: argparse.Namespace, env):
+    """PPO and A2C share a policy and differ only in the update."""
+    policy_kwargs = {"net_arch": list(args.net_arch)}
+    if args.algo == "ppo":
+        return PPO(
+            "MlpPolicy",
+            env,
+            learning_rate=args.lr,
+            gamma=args.gamma,
+            n_steps=args.n_steps,
+            batch_size=args.batch_size,
+            n_epochs=args.n_epochs,
+            clip_range=args.clip_range,
+            gae_lambda=args.gae_lambda,
+            ent_coef=args.ent_coef,
+            vf_coef=args.vf_coef,
+            max_grad_norm=args.max_grad_norm,
+            policy_kwargs=policy_kwargs,
+            seed=args.seed,
+            verbose=0,
+            device="cpu",
+        )
+    return A2C(
+        "MlpPolicy",
+        env,
+        learning_rate=args.lr,
+        gamma=args.gamma,
+        n_steps=args.n_steps,
+        gae_lambda=args.gae_lambda,
+        ent_coef=args.ent_coef,
+        vf_coef=args.vf_coef,
+        max_grad_norm=args.max_grad_norm,
+        use_rms_prop=args.use_rms_prop,
+        policy_kwargs=policy_kwargs,
+        seed=args.seed,
+        verbose=0,
+        device="cpu",
+    )
+
+
 def train(args: argparse.Namespace) -> dict:
     """Dispatch to the right trainer, then share the eval and logging path."""
-    # TODO: reinforce -> training.reinforce.train_reinforce, otherwise construct
-    # the SB3 model. All three write the same Monitor CSV schema and config.json.
-    raise NotImplementedError
+    limit_threads()
+    run_dir = LOG_ROOT / args.run_name
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    config: dict = {
+        "id": args.run_name,
+        "algo": args.algo,
+        "lr": args.lr,
+        "gamma": args.gamma,
+        "ent_coef": args.ent_coef,
+        "net_arch": list(args.net_arch),
+        "timesteps": args.timesteps,
+        "seed": args.seed,
+    }
+
+    if args.algo == "reinforce":
+        # Monte Carlo updates need whole episodes, so this one runs unvectorised.
+        env = make_env(seed=args.seed, monitor_dir=str(run_dir))()
+        cfg = ReinforceConfig(
+            lr=args.lr,
+            gamma=args.gamma,
+            baseline=args.baseline,
+            ent_coef=args.ent_coef,
+            episodes_per_update=args.episodes_per_update,
+            normalise_advantage=args.normalise_advantage,
+            net_arch=tuple(args.net_arch),
+            seed=args.seed,
+        )
+        model = train_reinforce(env, cfg, args.timesteps, run_dir)
+        model_path = MODEL_ROOT / "reinforce" / f"{args.run_name}.pt"
+        model_path.parent.mkdir(parents=True, exist_ok=True)
+        model.save(model_path)
+        config.update(
+            baseline=args.baseline,
+            episodes_per_update=args.episodes_per_update,
+            normalise_advantage=args.normalise_advantage,
+            n_envs=1,
+        )
+    else:
+        env = make_vec_env(args.n_envs, args.seed, str(run_dir))
+        model = _build_sb3(args, env)
+        model.learn(total_timesteps=args.timesteps, progress_bar=False)
+        model_path = MODEL_ROOT / args.algo / f"{args.run_name}.zip"
+        model_path.parent.mkdir(parents=True, exist_ok=True)
+        model.save(str(model_path))
+        config.update(
+            n_envs=args.n_envs,
+            n_steps=args.n_steps,
+            gae_lambda=args.gae_lambda,
+            vf_coef=args.vf_coef,
+            max_grad_norm=args.max_grad_norm,
+        )
+        if args.algo == "ppo":
+            config.update(
+                batch_size=args.batch_size, n_epochs=args.n_epochs, clip_range=args.clip_range
+            )
+        else:
+            config.update(use_rms_prop=args.use_rms_prop)
+
+    config.update(evaluate_both(model))
+    env.close()
+    dump_config(run_dir, config)
+    return config
 
 
 def main() -> None:

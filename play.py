@@ -12,12 +12,50 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import gymnasium as gym
+
+import environment  # noqa: F401  registers Umurima-v0
+from environment.custom_env import Action
+from training.baselines import RandomPolicy, ScriptedAgronomist
+
 
 def load_policy(model_path: Path | None, baseline: str | None):
-    """Load an SB3 zip, a REINFORCE checkpoint, or a scripted baseline."""
-    # TODO: dispatch on suffix and on the baseline flag. REINFORCE saves a .pt
-    # state dict, the SB3 algorithms save .zip.
-    raise NotImplementedError
+    if baseline == "random":
+        return RandomPolicy(gym.make("Umurima-v0").action_space)
+    if baseline == "scripted":
+        return ScriptedAgronomist()
+
+    if model_path is None:
+        raise ValueError("pass --model or --baseline")
+
+    suffix = model_path.suffix.lower()
+    if suffix == ".zip":
+        algo = model_path.parent.name
+        if algo == "dqn":
+            from stable_baselines3 import DQN
+            return DQN.load(str(model_path))
+        if algo == "ppo":
+            from stable_baselines3 import PPO
+            return PPO.load(str(model_path))
+        if algo == "a2c":
+            from stable_baselines3 import A2C
+            return A2C.load(str(model_path))
+        if algo == "pg":
+            stem = model_path.stem
+            if stem.startswith("ppo"):
+                from stable_baselines3 import PPO
+                return PPO.load(str(model_path))
+            if stem.startswith("a2c"):
+                from stable_baselines3 import A2C
+                return A2C.load(str(model_path))
+            if stem.startswith("reinforce"):
+                from training.reinforce import ReinforceAgent
+                return ReinforceAgent.load(str(model_path))
+        raise ValueError(f"unknown algorithm for {model_path}")
+    if suffix == ".pt":
+        from training.reinforce import ReinforceAgent
+        return ReinforceAgent.load(str(model_path))
+    raise ValueError(f"unknown model suffix: {suffix}")
 
 
 def run_episodes(
@@ -28,11 +66,46 @@ def run_episodes(
     render: bool = True,
     verbose: bool = False,
 ) -> list[float]:
-    """Roll out and return the episodic returns."""
-    # TODO: make the env with render_mode="human" when render, step the policy,
-    # print the per-day line when verbose, print the summary and the termination
-    # cause at the end of each episode.
-    raise NotImplementedError
+    render_mode = "human" if render else None
+    policy = load_policy(model_path, baseline)
+    env = gym.make("Umurima-v0", render_mode=render_mode)
+    returns: list[float] = []
+
+    for ep in range(episodes):
+        ep_seed = (seed or 0) + ep if seed is not None else None
+        obs, _ = env.reset(seed=ep_seed)
+        total = 0.0
+        step_count = 0
+
+        while True:
+            action, _ = policy.predict(obs, deterministic=True)
+            obs, reward, terminated, truncated, info = env.step(int(action))
+            total += float(reward)
+            step_count += 1
+
+            if verbose:
+                act_name = Action(int(action)).name
+                print(
+                    f"day {info.get('day', step_count):3d} | "
+                    f"action {act_name:<22s} | "
+                    f"reward {reward:+.3f} | "
+                    f"cash {info.get('cash_krwf', 0):+.1f} kRWF | "
+                    f"harvested {info.get('harvested_fraction', 0):.0%}"
+                )
+
+            if terminated or truncated:
+                cause = info.get("termination_cause", "truncated")
+                returns.append(total)
+                if verbose:
+                    print(
+                        f"--- episode {ep + 1} ended: {cause} | "
+                        f"return {total:.2f} | "
+                        f"days {info.get('day', step_count)}"
+                    )
+                break
+
+    env.close()
+    return returns
 
 
 def main() -> None:

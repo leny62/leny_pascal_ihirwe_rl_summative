@@ -1,0 +1,1 @@
+Convergence analysis. Left: median episodes to reach a return of 10 across all ten grid rows per algorithm, with standard deviation error bars. Right: rolling mean return for the best run of each algorithm, showing the trajectory that achieved the highest heldout score.

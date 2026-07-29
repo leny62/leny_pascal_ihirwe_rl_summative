@@ -96,6 +96,44 @@ def _causes_over_seeds(env, policy, seeds):
     return {_run(env, policy, s)["termination_cause"] for s in seeds}
 
 
+def _mean_return(env, policy, seeds):
+    totals = []
+    for seed in seeds:
+        obs, _ = env.reset(seed=seed)
+        total = 0.0
+        while True:
+            obs, reward, terminated, truncated, _ = env.step(policy(obs))
+            total += reward
+            if terminated or truncated:
+                totals.append(total)
+                break
+    return float(np.mean(totals))
+
+
+def test_immature_harvest_does_not_end_the_season():
+    """Pods do not exist early, so a harvest called on day one picks nothing and
+    the season carries on."""
+    env = gym.make("Umurima-v0")
+    env.reset(seed=0)
+    for _ in range(5):
+        _, _, terminated, truncated, info = env.step(int(Action.HARVEST_ALL))
+        assert not terminated and not truncated
+        assert info["harvested_fraction"] == 0.0
+
+
+def test_quitting_early_is_not_a_winning_strategy():
+    """Tripwire for a local optimum that once dominated this environment.
+
+    When harvest was ungated, ending the episode on day one scored better than
+    exploring, so every training run converged on it. If this regresses, the
+    sweep produces forty rows of an agent that refuses to farm.
+    """
+    env = gym.make("Umurima-v0")
+    quitting = _mean_return(env, lambda o: int(Action.HARVEST_ALL), range(20))
+    random_play = _mean_return(env, lambda o: env.action_space.sample(), range(20))
+    assert quitting < random_play
+
+
 def test_all_termination_causes_are_reachable():
     """The rubric wants the agent to explore edge cases, so each ending must be
     reachable. Pure random almost always harvests early, so reachability is shown

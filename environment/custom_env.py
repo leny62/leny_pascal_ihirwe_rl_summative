@@ -78,6 +78,11 @@ N_SPLIT_KG = 30.0
 K_APPLICATION_KG = 40.0
 PRE_HARVEST_INTERVAL_DAYS = 7
 PARTIAL_HARVEST_FRACTION = 0.40
+# Pods do not exist before this much of the thermal season has passed, so a
+# harvest called earlier picks nothing and does not end the season. Without this
+# the agent can end any episode on day one at almost no cost, which scores better
+# than exploring and becomes the policy every run converges to.
+HARVEST_MIN_GDD_FRAC = 0.60
 CONTRACT_WINDOW_DAY = 100
 
 # Physical scales
@@ -384,6 +389,10 @@ class UmurimaEnv(gym.Env):
     def _do_harvest(self, action: Action) -> float:
         standing = 1.0 - self._harvested_fraction
         if standing <= 0.0:
+            return 0.0
+        if self._gdd_frac() < HARVEST_MIN_GDD_FRAC:
+            # Nothing has podded yet. The crew still went out, so the day and the
+            # labour are spent, but the crop stays in the ground.
             return 0.0
         picked = min(PARTIAL_HARVEST_FRACTION, standing) if action == Action.HARVEST_PARTIAL else standing
         revenue = picked * self._standing_yield_kg() * self._price_today() * self._quality() / 1000.0

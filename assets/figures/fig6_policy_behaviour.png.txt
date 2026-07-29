@@ -1,0 +1,1 @@
+One episode under the best PPO policy (ppo-06). The episode trace shows cumulative return, cash position, soil moisture at the ridge and valley, canopy cover and nitrogen status, reservoir level, and the action sequence.

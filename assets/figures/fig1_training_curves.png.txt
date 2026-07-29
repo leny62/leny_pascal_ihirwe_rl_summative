@@ -1,0 +1,1 @@
+Training curves for the best hyperparameter run of each algorithm. Thin lines are per-episode returns; thick lines are a rolling mean (window=20 episodes). The dashed and dotted grey lines mark the scripted agronomist (21.1) and random (-1.1) baselines respectively. All four algorithms surpass the scripted baseline.

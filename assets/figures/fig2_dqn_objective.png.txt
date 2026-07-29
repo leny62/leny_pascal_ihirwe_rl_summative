@@ -1,0 +1,1 @@
+DQN hyperparameter study. Left: rolling mean returns for all ten grid rows, showing sensitivity to learning rate, discount factor, buffer size, and exploration schedule. Right: train versus heldout mean return for each row, with the identity line marking perfect generalisation.
