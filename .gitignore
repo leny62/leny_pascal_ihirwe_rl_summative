@@ -5,12 +5,15 @@ __pycache__/
 build/
 dist/
 
-# Training artefacts. Trained policies are tracked, raw run output is not.
-logs/**/tensorboard/
-logs/**/*.csv
-!logs/.gitkeep
-runs/
-*.pkl
+# Training artefacts. Best models are tracked for demo purposes, full
+# run output (logs, all 40 models) is not.
+logs/
+models/
+!models/ppo/ppo-06.zip
+!models/dqn/dqn-07.zip
+!models/reinforce/rf-09.pt
+!models/a2c/a2c-06.zip
+!models/.gitkeep
 
 # Rendered captures
 assets/captures/
