@@ -23,6 +23,7 @@ dependencies = [
 
 [project.optional-dependencies]
 api = ["fastapi>=0.115.0", "uvicorn>=0.30.0"]
+ui = ["streamlit>=1.40.0"]
 dev = ["pytest>=8.0.0", "ruff>=0.6.0"]
 
 [project.scripts]
