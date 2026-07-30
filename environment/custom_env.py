@@ -231,6 +231,7 @@ class UmurimaEnv(gym.Env):
         input_cost = 0.0
         labour_days = 0.0
         revenue = 0.0
+        harvested_before = self._harvested_fraction
 
         # Seed the first pest incursion once its arrival day passes.
         if self._day >= self._pest_arrival_day:
@@ -282,6 +283,7 @@ class UmurimaEnv(gym.Env):
             self._cash -= COST_PICKING
         self._cash += revenue
         self._labour_days_cum += labour_days
+        picked = self._harvested_fraction - harvested_before
 
         # --- advance the agronomy one day ------------------------------------
         n_leached = 0.0
@@ -327,7 +329,12 @@ class UmurimaEnv(gym.Env):
         stage_weight = FLOWERING_STRESS_WEIGHT if self._is_flowering() else 1.0
         terms = {
             "revenue": REVENUE_SCALE * revenue,
-            "labour": W_LABOUR * labour_days,
+            # Employment pays out with the crop, not per day worked. Paid daily
+            # it is worth ~18 points over a season with no harvest required, so a
+            # policy can hire crews for 120 days, sell nothing, and still score
+            # well. Settling it against the fraction actually picked keeps the
+            # job-creation objective while making it conditional on a real farm.
+            "labour": W_LABOUR * self._labour_days_cum * picked,
             "water": -C_WATER * irrigation_total,
             "input": -C_INPUT * input_cost,
             "leach": -C_LEACH * n_leached,
@@ -438,6 +445,12 @@ class UmurimaEnv(gym.Env):
     def _price_today(self) -> float:
         return float(self._weather.price_rwf[min(self._day, self.horizon - 1)])
 
+    def _zone_depletion_frac(self, zone) -> float:
+        """Root zone depletion as a fraction of that zone's total available water."""
+        root_depth = ag.root_depth_m(self._gdd_frac())
+        taw = ag.total_available_water(zone.soil_depth_m, root_depth)
+        return float(np.clip(zone.depletion_mm / taw if taw > 0 else 0.0, 0.0, 1.0))
+
     def _mean_canopy(self) -> float:
         return float(np.mean([z.canopy_cover for z in self._zones]))
 
@@ -459,9 +472,7 @@ class UmurimaEnv(gym.Env):
     def _observe(self) -> np.ndarray:
         obs = np.zeros(OBS_DIM, dtype=np.float32)
         noise_std = min(SCOUT_NOISE_PER_DAY * self._scout_staleness, SCOUT_NOISE_CAP)
-        root_depth = ag.ROOT_DEPTH_MIN_M + (ag.ROOT_DEPTH_MAX_M - ag.ROOT_DEPTH_MIN_M) * min(
-            self._gdd_frac() / 0.5, 1.0
-        )
+        root_depth = ag.root_depth_m(self._gdd_frac())
 
         for z, zone in enumerate(self._zones):
             base = z * ZONE_STRIDE
@@ -540,6 +551,11 @@ class UmurimaEnv(gym.Env):
         elif action in (Action.HARVEST_PARTIAL, Action.HARVEST_ALL):
             self._ledger.append(FieldEvent(day=self._day, action="harvest", quantity=round(revenue, 2), unit="krwf"))
 
+    @property
+    def render_closed(self) -> bool:
+        """True once the viewer window has been dismissed by the user."""
+        return self._renderer is not None and self._renderer.closed
+
     def _render_state(self) -> dict[str, Any]:
         return {
             "block_id": self.block_id,
@@ -548,6 +564,7 @@ class UmurimaEnv(gym.Env):
             "season": self._season,
             "stage": self._stage_value(),
             "gdd_fraction": self._gdd_frac(),
+            "flowering": self._is_flowering(),
             "action": self._last_action.name,
             "reward": self._last_reward,
             "return": self._return,
@@ -558,12 +575,19 @@ class UmurimaEnv(gym.Env):
             "within_phi": self._days_since_spray < PRE_HARVEST_INTERVAL_DAYS,
             "harvested_fraction": self._harvested_fraction,
             "yield_forecast_kg": self._standing_yield_kg(),
+            "water_stress": min(self._stress_accum / max(self._day, 1), 1.0),
+            "price_rwf": self._price_today(),
             "rain_today_mm": float(self._weather.rain_mm[min(self._day, self.horizon - 1)]),
             "rain_forecast_mm": self._weather.forecast(min(self._day, self.horizon - 1)).tolist(),
             "zones": [
                 {
                     "index": z.index,
                     "depletion_mm": z.depletion_mm,
+                    # Depletion against this zone's own capacity. Absolute mm are
+                    # not comparable between benches because a deep valley soil
+                    # holds far more water than a thin ridge, so anything drawing
+                    # a moisture bar or shading soil needs the fraction.
+                    "depletion_frac": self._zone_depletion_frac(z),
                     "canopy_cover": z.canopy_cover,
                     "nitrogen_kg_ha": z.nitrogen_kg_ha,
                     "pest_pressure": z.pest_pressure,

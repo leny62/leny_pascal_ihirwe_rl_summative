@@ -115,7 +115,9 @@ def _render_kpi_row(state: dict, mgr: EpisodeManager) -> None:
     rain = state.get("rain_today_mm", 0)
     stage_val = state.get("stage", 0)
     stage_names = ["Establishment", "Vegetative", "Flowering", "Ripening"]
-    stage = stage_names[min(int(stage_val * 3), 3)]
+    # Rounded, not truncated: the env emits 0, 1/3, 2/3, 1 and int(0.66 * 3)
+    # is 1, which would label the flowering stage "Vegetative".
+    stage = stage_names[min(int(round(stage_val * 3)), 3)]
 
     cols = st.columns(8)
     cols[0].metric("Day", f"{day}/{horizon}", delta=stage, delta_color="off")
@@ -144,7 +146,12 @@ def _render_zone_grid(state: dict) -> None:
     cols = st.columns(len(zones))
     for i, (col, zone) in enumerate(zip(cols, zones, strict=True)):
         with col:
-            depletion_frac = min(zone.get("depletion_mm", 0) / 100.0, 1.0)
+            # Fraction of this zone's own available water, not a fixed mm scale.
+            # A deep valley bench holds several times what a thin ridge bench
+            # does, so a shared divisor makes every zone read the same.
+            depletion_frac = float(
+                zone.get("depletion_frac", min(zone.get("depletion_mm", 0) / 100.0, 1.0))
+            )
             canopy = zone.get("canopy_cover", 0)
             nitrogen = zone.get("nitrogen_kg_ha", 0)
             pest = zone.get("pest_pressure", 0)

@@ -73,6 +73,11 @@ class ZoneState:
     waterlogged_days: int = 0
 
 
+def root_depth_m(gdd_frac: float) -> float:
+    """Rooting depth, growing linearly to its maximum by mid season."""
+    return ROOT_DEPTH_MIN_M + (ROOT_DEPTH_MAX_M - ROOT_DEPTH_MIN_M) * min(gdd_frac / 0.5, 1.0)
+
+
 def total_available_water(soil_depth_m: float, root_depth_m: float) -> float:
     """TAW in mm over the current root zone."""
     return 1000.0 * (THETA_FC - THETA_WP) * min(root_depth_m, soil_depth_m)
@@ -192,7 +197,7 @@ def step_zone(
     Returns the new state and the fluxes the reward needs.
     """
     gdd_frac = min(gdd_cum / GDD_MATURITY, 1.0)
-    root_depth = ROOT_DEPTH_MIN_M + (ROOT_DEPTH_MAX_M - ROOT_DEPTH_MIN_M) * min(gdd_frac / 0.5, 1.0)
+    root_depth = root_depth_m(gdd_frac)
     taw = total_available_water(zone.soil_depth_m, root_depth)
 
     # 1. Runoff from rainfall only. Run-on infiltrates, it does not re-run off.

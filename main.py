@@ -31,29 +31,31 @@ def main() -> None:
     p.add_argument("--episodes", type=int, default=1)
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--no-render", action="store_true")
+    p.add_argument(
+        "--fps",
+        type=float,
+        default=None,
+        help="simulated days per second when rendering; lower is easier to narrate",
+    )
     args = p.parse_args()
 
-    from play import run_episodes
+    from play import DEFAULT_RENDER_FPS, run_episodes
+
+    common = {
+        "episodes": args.episodes,
+        "seed": args.seed,
+        "render": not args.no_render,
+        "verbose": True,
+        "fps": args.fps if args.fps is not None else DEFAULT_RENDER_FPS,
+    }
 
     model_path = find_model()
     if model_path is None:
         print("No trained model found, falling back to the scripted agronomist.")
         print("Train one with: uv run training/pg_training.py --algo ppo --run-name ppo-01")
-        run_episodes(
-            baseline="scripted",
-            episodes=args.episodes,
-            seed=args.seed,
-            render=not args.no_render,
-            verbose=True,
-        )
+        run_episodes(baseline="scripted", **common)
     else:
-        run_episodes(
-            model_path=model_path,
-            episodes=args.episodes,
-            seed=args.seed,
-            render=not args.no_render,
-            verbose=True,
-        )
+        run_episodes(model_path=model_path, **common)
 
 
 if __name__ == "__main__":

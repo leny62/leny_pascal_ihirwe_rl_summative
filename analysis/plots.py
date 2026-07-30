@@ -33,7 +33,7 @@ STYLE_PATH = Path("analysis/plots.mplstyle")
 LOG_ROOT = Path("logs")
 
 BASELINE_SCRIPTED = 21.06
-BASELINE_RANDOM = -1.1
+BASELINE_RANDOM = 5.52
 
 
 def load_monitor(run_dir: Path) -> pd.DataFrame:
@@ -49,11 +49,18 @@ def load_monitor(run_dir: Path) -> pd.DataFrame:
             continue
         if "r" not in df.columns or "l" not in df.columns:
             continue
-        frames.append(df[["r", "l"]])
+        keep = ["r", "l", "t"] if "t" in df.columns else ["r", "l"]
+        frames.append(df[keep])
     if not frames:
         return pd.DataFrame(columns=["r", "l", "timestep"])
 
     combined = pd.concat(frames, ignore_index=True)
+    # Parallel runs write one CSV per worker, each with its own clock. Ordering
+    # by episode end time interleaves them back into a single training timeline.
+    # Concatenating instead makes every worker's early episodes look like a
+    # mid-training collapse, one sawtooth per worker.
+    if "t" in combined.columns:
+        combined = combined.sort_values("t", kind="mergesort").reset_index(drop=True)
     combined["timestep"] = combined["l"].cumsum()
     combined.rename(columns={"r": "return", "l": "length"}, inplace=True)
     return combined
@@ -81,7 +88,7 @@ def fig1_training_curves(out: Path) -> None:
     y_min, y_max = float("inf"), float("-inf")
     lines_data: list[tuple[Any, str, pd.Series, pd.Series, pd.Series]] = []
 
-    for ax, algo in zip(axes, ["dqn", "reinforce", "ppo", "a2c"]):
+    for ax, algo in zip(axes, ["dqn", "reinforce", "ppo", "a2c"], strict=True):
         run_id = _best_run(algo)
         run_dir = LOG_ROOT / run_id
         df = load_monitor(run_dir)
@@ -199,33 +206,59 @@ def fig4_convergence(out: Path) -> None:
     the four best runs.
     """
     results = pd.read_csv("experiments/results.csv")
-    threshold = 10.0
+    threshold = BASELINE_SCRIPTED
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
     ax1 = axes[0]
-    algo_episodes: dict[str, list[float]] = {}
+    # Timesteps, not episode index, and a full rolling window. A short window
+    # lets one lucky episode cross the line, which reports noise as convergence.
+    algo_steps: dict[str, list[float]] = {}
     for algo in ["dqn", "reinforce", "ppo", "a2c"]:
         algo_rows = results[results["algo"] == algo]
-        episodes_to_thresh: list[float] = []
+        steps_to_thresh: list[float] = []
         for _, row in algo_rows.iterrows():
-            run_id = str(row["id"])
-            df = load_monitor(LOG_ROOT / run_id)
+            df = load_monitor(LOG_ROOT / str(row["id"]))
             if df.empty:
                 continue
-            rm = _rolling_mean(df["return"], window=5)
+            # Full window, not min_periods=1, or a single lucky first episode
+            # counts as convergence and every method looks instant.
+            rm = df["return"].rolling(window=ROLLING_WINDOW, min_periods=ROLLING_WINDOW).mean()
             hit = np.where(rm >= threshold)[0]
-            episodes_to_thresh.append(float(hit[0] + 1) if len(hit) > 0 else float("nan"))
-        algo_episodes[algo] = episodes_to_thresh
+            steps_to_thresh.append(
+                float(df["timestep"].iloc[hit[0]]) if len(hit) > 0 else float("nan")
+            )
+        algo_steps[algo] = steps_to_thresh
+
+    medians, lo_err, hi_err, reached = [], [], [], []
+    for algo in ALGO_LABELS:
+        vals = np.asarray(algo_steps[algo], dtype=float)
+        finite = vals[~np.isnan(vals)]
+        reached.append(len(finite))
+        if len(finite) == 0:
+            medians.append(np.nan)
+            lo_err.append(0.0)
+            hi_err.append(0.0)
+            continue
+        med = float(np.median(finite))
+        medians.append(med)
+        # Interquartile spread, so the whisker can never run below zero steps.
+        lo_err.append(max(0.0, med - float(np.percentile(finite, 25))))
+        hi_err.append(max(0.0, float(np.percentile(finite, 75)) - med))
+
     ax1.bar(
-        list(ALGO_LABELS.keys()),
-        [np.nanmedian(algo_episodes[a]) for a in ALGO_LABELS],
+        [ALGO_LABELS[a] for a in ALGO_LABELS],
+        medians,
         color=[ALGO_COLOURS[a] for a in ALGO_LABELS],
-        yerr=[np.nanstd(algo_episodes[a]) for a in ALGO_LABELS],
+        yerr=[lo_err, hi_err],
         capsize=5,
     )
-    ax1.set_ylabel(f"Episodes to return >= {threshold}")
-    ax1.set_title(f"Convergence speed (threshold = {threshold})")
+    ax1.set_ylim(bottom=0)
+    for i, (m, n) in enumerate(zip(medians, reached, strict=True)):
+        if not np.isnan(m):
+            ax1.text(i, m, f"{n}/10 runs", ha="center", va="bottom", fontsize=9)
+    ax1.set_ylabel("Timesteps to beat the scripted agronomist")
+    ax1.set_title(f"Sample efficiency (median steps to rolling return >= {threshold:.0f})")
 
     ax2 = axes[1]
     for algo in ["dqn", "reinforce", "ppo", "a2c"]:
@@ -291,10 +324,17 @@ def fig5_generalisation(out: Path) -> None:
 def fig6_policy_behaviour(out: Path) -> None:
     """One episode under the best PPO policy. Not required, most persuasive figure."""
     import gymnasium as gym
-    import environment  # noqa: F401
 
+    import environment  # noqa: F401
+    from environment.custom_env import (
+        N_ZONES,
+        Z_CANOPY,
+        Z_DEPLETION,
+        Z_NITROGEN,
+        ZONE_STRIDE,
+        Action,
+    )
     from play import load_policy
-    from environment.custom_env import Action, N_ZONES, Z_DEPLETION, Z_CANOPY, Z_NITROGEN, ZONE_STRIDE
 
     model_path = Path("models/ppo/ppo-06.zip")
     if not model_path.exists():

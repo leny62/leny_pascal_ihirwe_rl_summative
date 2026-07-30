@@ -18,6 +18,10 @@ import environment  # noqa: F401  registers Umurima-v0
 from environment.custom_env import Action
 from training.baselines import RandomPolicy, ScriptedAgronomist
 
+# Simulated days per second. A season is only ~90 days, so 12 fps runs a whole
+# episode in under 8 seconds. 4 is slow enough to narrate over.
+DEFAULT_RENDER_FPS = 4.0
+
 
 def load_policy(model_path: Path | None, baseline: str | None):
     if baseline == "random":
@@ -65,10 +69,16 @@ def run_episodes(
     seed: int | None = None,
     render: bool = True,
     verbose: bool = False,
+    fps: float = DEFAULT_RENDER_FPS,
 ) -> list[float]:
     render_mode = "human" if render else None
     policy = load_policy(model_path, baseline)
     env = gym.make("Umurima-v0", render_mode=render_mode)
+    clock = None
+    if render:
+        import pygame
+
+        clock = pygame.time.Clock()
     returns: list[float] = []
 
     for ep in range(episodes):
@@ -82,6 +92,10 @@ def run_episodes(
             obs, reward, terminated, truncated, info = env.step(int(action))
             total += float(reward)
             step_count += 1
+
+            if render and not env.unwrapped.render_closed:
+                env.render()
+                clock.tick(fps)
 
             if verbose:
                 act_name = Action(int(action)).name
@@ -104,8 +118,23 @@ def run_episodes(
                     )
                 break
 
+    if render and not env.unwrapped.render_closed:
+        _hold_final_frame(env, clock)
     env.close()
     return returns
+
+
+def _hold_final_frame(env, clock) -> None:
+    """Keep the window up after the last episode so the end state stays readable.
+
+    Without this the window closes the instant the episode terminates, which at
+    a season length of ~90 days is only a few seconds after it opened. The
+    renderer owns event handling, so the camera stays interactive here.
+    """
+    print("Episode complete. Drag to orbit, scroll to zoom, Esc or close to exit.")
+    while not env.unwrapped.render_closed:
+        env.render()
+        clock.tick(60)
 
 
 def main() -> None:
@@ -116,6 +145,12 @@ def main() -> None:
     p.add_argument("--seed", type=int)
     p.add_argument("--no-render", dest="render", action="store_false")
     p.add_argument("--verbose", action="store_true")
+    p.add_argument(
+        "--fps",
+        type=float,
+        default=DEFAULT_RENDER_FPS,
+        help="simulated days per second when rendering; lower is easier to narrate",
+    )
     args = p.parse_args()
 
     if args.model is None and args.baseline is None:
@@ -128,6 +163,7 @@ def main() -> None:
         seed=args.seed,
         render=args.render,
         verbose=args.verbose,
+        fps=args.fps,
     )
     print(f"mean return over {len(returns)} episodes: {sum(returns) / len(returns):.2f}")
 
