@@ -60,25 +60,81 @@ visit, so the agent has to decide when paying for information is worth it.
 Requires [uv](https://docs.astral.sh/uv/).
 
 ```bash
-uv sync
+uv sync                    # core: environment, training, analysis
+uv sync --extra ui         # adds the Streamlit dashboard
+uv sync --extra api        # adds the JSON API
+uv sync --extra dev        # adds pytest and ruff
 ```
 
 ## Running
 
-Watch the trained agent work a season in the 3D view:
+### 3D view
+
+Watch the best trained policy work a season:
 
 ```bash
 uv run main.py
 ```
 
-Pick a specific policy or run headless:
+The window is interactive: **drag** to orbit, **scroll** to zoom, **R** to reset
+the view, **Esc** to quit. The final frame is held until you close it.
+
+A season is only ~90 days, so pick a rate you can narrate over. `--fps` is
+simulated days per second:
 
 ```bash
-uv run play.py --model models/dqn/best.zip --episodes 3
-uv run play.py --model models/pg/ppo_best.zip --no-render --episodes 50
+uv run main.py --fps 1      # ~90 s per season
+uv run main.py --fps 0.5    # ~3 min per season
+uv run main.py --no-render  # terminal only
 ```
 
-Train:
+The HUD shows day and growth stage, cash, reservoir level, market price,
+standing yield, rainfall today and the three day forecast, running water stress,
+and the current action. The stage turns amber during flowering, when stress costs
+yield that later irrigation cannot recover, and a pre-harvest interval breach is
+flagged in red.
+
+### Pick a policy
+
+```bash
+uv run play.py --model models/ppo/ppo-06.zip --verbose
+uv run play.py --model models/dqn/dqn-07.zip --episodes 3
+uv run play.py --model models/reinforce/rf-09.pt --no-render --episodes 50
+uv run play.py --baseline scripted --no-render --episodes 40
+uv run play.py --baseline random --no-render --episodes 40
+```
+
+### Streamlit dashboard
+
+A browser view of the same episode, useful for stepping through a season and
+inspecting the audit trail:
+
+```bash
+uv run --extra ui streamlit run ui/dashboard.py
+```
+
+Choose a policy and seed, then step day by day or leave it on auto-play. It shows
+KPI tiles, per-zone moisture, canopy and nitrogen indicators, the action log, the
+hash-chained field ledger with its verification status, and the weather forecast.
+
+### JSON API
+
+```bash
+uv run --extra api uvicorn api.server:app --reload
+```
+
+| Endpoint | Method | Returns |
+|---|---|---|
+| `/health` | GET | liveness |
+| `/episode` | POST | creates an episode (`?seed=&policy=`), returns its id and state |
+| `/episode/{id}/state` | GET | block state: four zones, weather, cash, reservoir |
+| `/episode/{id}/advance` | POST | steps `?days=N`, returns actions taken and new state |
+| `/episode/{id}/ledger` | GET | hash-chained field events with season totals |
+| `/episode/{id}/ledger/verify` | GET | recomputes the chain, `false` means a record was altered |
+
+`policy` accepts `scripted`, `random`, or a path to any model file.
+
+### Train
 
 ```bash
 uv run training/dqn_training.py --run-name dqn-baseline --lr 1e-4 --gamma 0.99
@@ -87,17 +143,18 @@ uv run training/pg_training.py --algo reinforce --run-name rf-baseline --lr 1e-3
 uv run training/pg_training.py --algo a2c --run-name a2c-baseline --lr 7e-4
 ```
 
-Reproduce the full hyperparameter study (40 runs):
+### Reproduce the hyperparameter study (40 runs)
 
 ```bash
-uv run experiments/sweep.py --all --workers 6
-uv run analysis/plots.py --out assets/figures
+uv run experiments/sweep.py --all --workers 6     # writes experiments/results.csv
+uv run analysis/plots.py --all --out assets/figures
+uv run analysis/tables.py --out assets/tables
 ```
 
-Tests:
+### Tests
 
 ```bash
-uv run pytest
+uv run --extra dev pytest
 ```
 
 ## Layout
@@ -118,21 +175,38 @@ experiments/
   sweep.py           runs the hyperparameter grid across cores
   configs/           one YAML per algorithm, 10 rows each
 analysis/
-  plots.py           reward curves, DQN loss, PG entropy, convergence, generalisation
+  plots.py           reward curves, DQN diagnostics, PG entropy, convergence, generalisation
+  tables.py          the four hyperparameter tables, built from results.csv
+ui/
+  dashboard.py       Streamlit block monitor
+  _manager.py        episode lifecycle behind a narrow interface
 api/
   server.py          read-only JSON state and ledger endpoints
 ```
 
 ## Results
 
-Filled from `experiments/results.csv` once the sweep completes.
+From `experiments/results.csv`, 40 runs, 400k timesteps each. Train is 30 episodes
+on seeds 0-29; held out is 100 episodes on seeds 10000-10099, which no training
+run ever saw.
 
-| Method | Best mean reward | Episodes to converge | Held-out seed mean |
-|---|---|---|---|
-| DQN | TODO | TODO | TODO |
-| REINFORCE | TODO | TODO | TODO |
-| PPO | TODO | TODO | TODO |
-| A2C | TODO | TODO | TODO |
+| Method | Best run | Train mean | Held-out mean | Harvest rate | What made it best |
+|---|---|---|---|---|---|
+| **PPO** | ppo-06 | **99.9** | **103.1** | 88% | rollout shorter than one episode |
+| REINFORCE | rf-09 | 67.2 | 73.2 | 93% | batching 8 episodes per update |
+| DQN | dqn-07 | 65.8 | 66.3 | 0% | large replay buffer |
+| A2C | a2c-06 | 45.4 | 56.9 | 48% | entropy bonus |
+
+Reference points: the scripted agronomist scores **+21.1** and a random policy
+**-1.1**, so PPO is roughly five times the hand-coded expert rules.
+
+DQN is the interesting failure. It scores respectably by keeping the crop alive
+but almost never harvests on held-out seeds: with `gamma=0.99` and harvest ~90
+steps away the terminal reward is discounted to about 40 percent of face value,
+so the Q-function learns to avoid failure without learning to pursue the payoff.
+
+Convergence curves are in `assets/figures/fig4_convergence.png`; the full
+per-hyperparameter tables are in `assets/tables/`.
 
 ## Notes on the model
 
