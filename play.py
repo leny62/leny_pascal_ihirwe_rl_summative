@@ -21,6 +21,9 @@ from training.baselines import RandomPolicy, ScriptedAgronomist
 # Simulated days per second. A season is only ~90 days, so 12 fps runs a whole
 # episode in under 8 seconds. 4 is slow enough to narrate over.
 DEFAULT_RENDER_FPS = 4.0
+# Frames drawn per second. Independent of how fast the season advances, so the
+# orbit camera stays responsive while the simulation is paced for narration.
+DISPLAY_FPS = 60
 
 
 def load_policy(model_path: Path | None, baseline: str | None):
@@ -94,8 +97,16 @@ def run_episodes(
             step_count += 1
 
             if render and not env.unwrapped.render_closed:
-                env.render()
-                clock.tick(fps)
+                # Draw many frames per simulated day rather than one. Pacing the
+                # whole window at `fps` meant the camera also only updated that
+                # often, so at the default 4 days/sec an orbit or zoom redrew
+                # four times a second and felt broken. The season still advances
+                # at `fps` days per second; only the frame rate is decoupled.
+                for _ in range(max(1, int(round(DISPLAY_FPS / max(fps, 0.1))))):
+                    if env.unwrapped.render_closed:
+                        break
+                    env.render()
+                    clock.tick(DISPLAY_FPS)
 
             if verbose:
                 act_name = Action(int(action)).name

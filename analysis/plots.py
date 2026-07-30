@@ -170,32 +170,124 @@ def fig2_dqn_objective(out: Path) -> None:
     print(f"wrote {out / 'fig2_dqn_objective.png'}")
 
 
-def fig3_pg_entropy(out: Path) -> None:
-    """Policy entropy for REINFORCE across entropy coefficient settings.
+def _probe_states(n: int = 256, seed: int = 4242) -> np.ndarray:
+    """A fixed batch of observations to measure policy entropy against.
 
-    SB3 (PPO, A2C) does not log per-step policy entropy through the Monitor
-    wrapper. REINFORCE entropy is read from the hand-written entropy.csv.
+    The same states are used for every run so the entropies are comparable.
+    """
+    import gymnasium as gym
+
+    import environment  # noqa: F401  registers Umurima-v0
+
+    env = gym.make("Umurima-v0")
+    rng = np.random.default_rng(seed)
+    states = []
+    obs, _ = env.reset(seed=seed)
+    while len(states) < n:
+        states.append(np.asarray(obs, dtype=np.float32))
+        obs, _, terminated, truncated, _ = env.step(int(rng.integers(env.action_space.n)))
+        if terminated or truncated:
+            obs, _ = env.reset(seed=int(rng.integers(0, 10_000)))
+    env.close()
+    return np.stack(states)
+
+
+def _final_policy_entropy(algo: str, run_id: str, states: np.ndarray) -> float | None:
+    """Mean entropy of the trained policy over the probe states, in nats."""
+    import torch
+
+    try:
+        if algo == "reinforce":
+            from training.reinforce import ReinforceAgent
+
+            path = Path(f"models/reinforce/{run_id}.pt")
+            if not path.exists():
+                return None
+            agent = ReinforceAgent.load(str(path))
+            with torch.no_grad():
+                dist = agent.policy(torch.as_tensor(states, dtype=torch.float32))
+            return float(dist.entropy().mean().item())
+
+        from stable_baselines3 import A2C, PPO
+
+        cls = {"ppo": PPO, "a2c": A2C}[algo]
+        path = Path(f"models/{algo}/{run_id}.zip")
+        if not path.exists():
+            return None
+        model = cls.load(str(path), device="cpu")
+        with torch.no_grad():
+            tensor, _ = model.policy.obs_to_tensor(states)
+            dist = model.policy.get_distribution(tensor)
+        return float(dist.distribution.entropy().mean().item())
+    except Exception:
+        return None
+
+
+def fig3_pg_entropy(out: Path) -> None:
+    """Policy entropy for all three policy gradient methods.
+
+    Left: REINFORCE entropy over training, read from the hand-written
+    entropy.csv, which is the only per-update log available because the
+    implementation is ours.
+
+    Right: final policy entropy against held-out return for all 30 policy
+    gradient runs. Stable-Baselines3 does not expose per-update entropy through
+    the Monitor wrapper, so PPO and A2C are measured after training by
+    evaluating each saved policy on one fixed batch of observations. That gives
+    a comparable end point for every run even though only REINFORCE has a curve.
     """
     results = pd.read_csv("experiments/results.csv")
-    rf = results[results["algo"] == "reinforce"]
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5.4))
 
-    fig, ax = plt.subplots(figsize=(10, 5))
+    rf = results[results["algo"] == "reinforce"]
     for _, row in rf.iterrows():
         run_id = str(row["id"])
         entropy_path = LOG_ROOT / run_id / "entropy.csv"
         if not entropy_path.exists():
             continue
         ent = pd.read_csv(entropy_path)
-        ent_coef = row.get("ent_coef", 0)
-        label = f"{run_id} (ent_coef={ent_coef})"
-        ax.plot(ent["timesteps"], ent["entropy"], linewidth=1.0, label=label)
-    ax.axhline(UNIFORM_ENTROPY, color="gray", linestyle="--", linewidth=1.0, label=f"Uniform ln(18)={UNIFORM_ENTROPY:.3f}")
-    ax.set_xlabel("Timestep")
-    ax.set_ylabel("Policy entropy (nats)")
-    ax.set_title("Figure 3: REINFORCE policy entropy")
-    ax.legend(fontsize=7)
+        label = f"{run_id} (ent_coef={row.get('ent_coef', 0)}) -> {row['heldout_mean_return']:.1f}"
+        ax1.plot(ent["timesteps"], ent["entropy"], linewidth=1.0, label=label)
+    ax1.axhline(
+        UNIFORM_ENTROPY, color="gray", linestyle="--", linewidth=1.0,
+        label=f"Uniform ln(18) = {UNIFORM_ENTROPY:.2f}",
+    )
+    ax1.set_xlabel("Timestep")
+    ax1.set_ylabel("Policy entropy (nats)")
+    ax1.set_title("REINFORCE entropy during training")
+    ax1.legend(fontsize=6)
 
-    fig.tight_layout()
+    states = _probe_states()
+    for algo in ("reinforce", "ppo", "a2c"):
+        xs, ys, ids = [], [], []
+        for _, row in results[results["algo"] == algo].iterrows():
+            ent = _final_policy_entropy(algo, str(row["id"]), states)
+            if ent is None:
+                continue
+            xs.append(ent)
+            ys.append(float(row["heldout_mean_return"]))
+            ids.append(str(row["id"]))
+        if not xs:
+            continue
+        ax2.scatter(xs, ys, s=55, alpha=0.85, color=ALGO_COLOURS[algo],
+                    label=ALGO_LABELS[algo], zorder=3)
+        best = int(np.argmax(ys))
+        ax2.annotate(ids[best], (xs[best], ys[best]), fontsize=7,
+                     xytext=(6, 4), textcoords="offset points")
+    ax2.axvline(UNIFORM_ENTROPY, color="gray", linestyle="--", linewidth=1.0)
+    ax2.text(UNIFORM_ENTROPY, ax2.get_ylim()[0], " uniform", fontsize=7,
+             color="gray", va="bottom")
+    ax2.axvline(0.0, color="crimson", linestyle=":", linewidth=1.2)
+    ax2.text(0.0, ax2.get_ylim()[0], " collapsed", fontsize=7,
+             color="crimson", va="bottom")
+    ax2.axhline(BASELINE_SCRIPTED, color="gray", linestyle="-.", linewidth=0.9)
+    ax2.set_xlabel("Final policy entropy (nats, fixed 256-state probe)")
+    ax2.set_ylabel("Held-out mean return")
+    ax2.set_title("Exploration retained vs performance, all 30 PG runs")
+    ax2.legend(fontsize=8)
+
+    fig.suptitle("Figure 3: Policy gradient entropy", fontweight="bold")
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
     fig.savefig(out / "fig3_pg_entropy.png", dpi=DPI)
     plt.close(fig)
     print(f"wrote {out / 'fig3_pg_entropy.png'}")
