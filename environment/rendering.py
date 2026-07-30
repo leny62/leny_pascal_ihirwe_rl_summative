@@ -51,11 +51,12 @@ BUND_ROWS = frozenset({ROWS_PER_ZONE - 1, 2 * ROWS_PER_ZONE - 1, 3 * ROWS_PER_ZO
 
 # Crop is planted in rows, which is how the block is actually managed and reads
 # far better than a random scatter.
-CROP_ROWS_PER_ZONE = 3
-CROP_PER_ROW = 16
+CROP_ROWS_PER_ZONE = 5
+CROP_PER_ROW = 26
 CROP_PER_ZONE = CROP_ROWS_PER_ZONE * CROP_PER_ROW
-CROP_RADIUS = 0.045
-CROP_MAX_HEIGHT = 0.55
+CROP_RADIUS = 0.038
+CROP_MAX_HEIGHT = 0.62
+CROP_MIN_HEIGHT = 0.10
 
 RAIN_INSTANCES = 220
 RAIN_TOP = ZONE_HEIGHTS[0] + 2.4
@@ -89,12 +90,14 @@ HUD_BLUE_RGB = (128, 190, 240)
 HUD_DIM_RGB = (120, 134, 148)
 
 # Orbit camera limits
-CAMERA_TARGET = (3.4, 0.30, 2.0)
+CAMERA_TARGET = (3.5, 0.75, 2.0)
 CAMERA_START = (136.2, 33.1, 11.9)  # azimuth, elevation (degrees), distance
-ELEVATION_RANGE = (9.0, 78.0)
-DISTANCE_RANGE = (5.5, 28.0)
+# Below ~20 degrees the near skirt of the block fills the frame and the
+# terraces stop being visible at all, so the floor is set above that.
+ELEVATION_RANGE = (20.0, 76.0)
+DISTANCE_RANGE = (8.0, 24.0)
 ORBIT_SENSITIVITY = 0.32
-ZOOM_SENSITIVITY = 0.08
+ZOOM_SENSITIVITY = 0.06
 
 MESH_VERTEX_SHADER = """#version 410 core
 layout (location = 0) in vec3 in_pos;
@@ -522,6 +525,7 @@ class BlockRenderer:
         self._sky_vao = _build_screen_quad(-1.0, -1.0, 1.0, 1.0)
         self._hud_vao = self._build_hud_quad()
         self._hud_texture = gl.glGenTextures(1)
+        self._hud_key: tuple | None = None
         self._font = None
         self._font_bold = None
 
@@ -570,7 +574,7 @@ class BlockRenderer:
             zone_start = zone * ZONE_DEPTH
             for crop_row in range(CROP_ROWS_PER_ZONE):
                 # Keep clear of the bund on the downslope edge.
-                fraction = 0.26 + 0.21 * crop_row
+                fraction = 0.20 + 0.145 * crop_row
                 z_centre = zone_start + ZONE_DEPTH * fraction
                 for slot in range(CROP_PER_ROW):
                     x = 0.38 + (TOTAL_WIDTH - 0.76) * slot / (CROP_PER_ROW - 1)
@@ -770,7 +774,10 @@ class BlockRenderer:
                 colours[idx] = colour
                 # Harvest clears plants progressively rather than all at once.
                 picked = slot < lifted_per_zone
-                scales[idx] = 0.0 if picked else canopy * CROP_MAX_HEIGHT + 0.03
+                # Square root, not linear: canopy spends most of the season
+                # below 0.5, and a linear map renders that as invisible specks.
+                grown = CROP_MIN_HEIGHT + (CROP_MAX_HEIGHT - CROP_MIN_HEIGHT) * canopy**0.5
+                scales[idx] = 0.0 if picked else grown
 
         gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self._crop_offsets)
         gl.glBufferSubData(gl.GL_ARRAY_BUFFER, 0, offsets.nbytes, offsets)
@@ -832,21 +839,60 @@ class BlockRenderer:
         gl.glEnable(gl.GL_DEPTH_TEST)
 
     def _upload_hud_texture(self, state: dict[str, Any]) -> None:
+        """Re-rasterise the HUD only when the day's state actually changed.
+
+        Rebuilding meant ~20 pygame text rasterisations, 16 bar fills and a full
+        984x210 RGBA reallocation on every frame. At 60 fps against a simulation
+        that only advances a dozen times a second that is almost all wasted, and
+        it is what made orbiting and zooming feel like they lagged.
+        """
         import OpenGL.GL as gl
         import pygame
 
-        surface = self._build_hud(state)
-        data = pygame.image.tobytes(surface, "RGBA", True)
+        key = self._hud_cache_key(state)
         gl.glActiveTexture(gl.GL_TEXTURE0)
         gl.glBindTexture(gl.GL_TEXTURE_2D, self._hud_texture)
-        gl.glTexImage2D(
-            gl.GL_TEXTURE_2D, 0, gl.GL_RGBA, HUD_SIZE[0], HUD_SIZE[1], 0,
-            gl.GL_RGBA, gl.GL_UNSIGNED_BYTE, data,
+        if key == self._hud_key:
+            return
+
+        surface = self._build_hud(state)
+        data = pygame.image.tobytes(surface, "RGBA", True)
+        if self._hud_key is None:
+            gl.glTexImage2D(
+                gl.GL_TEXTURE_2D, 0, gl.GL_RGBA, HUD_SIZE[0], HUD_SIZE[1], 0,
+                gl.GL_RGBA, gl.GL_UNSIGNED_BYTE, data,
+            )
+            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
+            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
+            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
+            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
+        else:
+            # Same dimensions every time, so update in place rather than realloc.
+            gl.glTexSubImage2D(
+                gl.GL_TEXTURE_2D, 0, 0, 0, HUD_SIZE[0], HUD_SIZE[1],
+                gl.GL_RGBA, gl.GL_UNSIGNED_BYTE, data,
+            )
+        self._hud_key = key
+
+    @staticmethod
+    def _hud_cache_key(state: dict[str, Any]) -> tuple:
+        zones = state.get("zones", [])
+        return (
+            state.get("day"), state.get("action"), state.get("cash_krwf"),
+            state.get("return"), state.get("yield_forecast_kg"),
+            state.get("harvested_fraction"), state.get("rain_today_mm"),
+            state.get("within_phi"), state.get("stage"),
+            state.get("reservoir_fraction"), state.get("price_rwf"),
+            tuple(
+                (
+                    round(z.get("depletion_frac", 0.0), 3),
+                    round(z.get("canopy_cover", 0.0), 3),
+                    round(z.get("pest_pressure", 0.0), 3),
+                    round(z.get("weed_pressure", 0.0), 3),
+                )
+                for z in zones
+            ),
         )
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
 
     def _build_hud(self, state: dict[str, Any]):
         """Text overlay. Pre-harvest interval line goes red inside the window,
