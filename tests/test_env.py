@@ -127,10 +127,31 @@ def test_quitting_early_is_not_a_winning_strategy():
     When harvest was ungated, ending the episode on day one scored better than
     exploring, so every training run converged on it. If this regresses, the
     sweep produces forty rows of an agent that refuses to farm.
+
+    Two things matter for this to be a test rather than a coin flip. The action
+    space is seeded, because `sample()` otherwise draws from an RNG whose state
+    carries over from earlier tests in the same process, which made the result
+    depend on test ordering. And the load-bearing comparison is against the
+    scripted agronomist, not against random play: returns here have a standard
+    deviation of roughly 35, random beats quitting on only about half of
+    individual seeds, and the gap between them is inside the noise. The gap to
+    the scripted baseline is not.
     """
+    from training.baselines import ScriptedAgronomist
+
     env = gym.make("Umurima-v0")
-    quitting = _mean_return(env, lambda o: int(Action.HARVEST_ALL), range(20))
-    random_play = _mean_return(env, lambda o: env.action_space.sample(), range(20))
+    seeds = range(30)
+    quitting = _mean_return(env, lambda o: int(Action.HARVEST_ALL), seeds)
+
+    scripted = ScriptedAgronomist()
+    farming = _mean_return(env, lambda o: scripted.predict(o)[0], seeds)
+    assert quitting < farming - 15.0, (
+        f"quitting on day one scored {quitting:.2f} against {farming:.2f} for the "
+        "scripted agronomist; the harvest gate has probably regressed"
+    )
+
+    env.action_space.seed(0)
+    random_play = _mean_return(env, lambda o: env.action_space.sample(), seeds)
     assert quitting < random_play
 
 
