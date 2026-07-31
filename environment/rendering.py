@@ -24,7 +24,7 @@ GL_MAJOR, GL_MINOR = 3, 3
 
 SOIL_DRY_RGB = (0.72, 0.58, 0.36)
 SOIL_WET_RGB = (0.34, 0.24, 0.15)
-SUBSOIL_RGB = (0.30, 0.22, 0.16)
+SUBSOIL_RGB = (0.44, 0.32, 0.22)
 CROP_HEALTHY_RGB = (0.22, 0.55, 0.18)
 CROP_STRESSED_RGB = (0.78, 0.74, 0.26)
 RAIN_RGB = (0.72, 0.85, 0.98)
@@ -63,6 +63,47 @@ RAIN_TOP = ZONE_HEIGHTS[0] + 2.4
 RAIN_BOTTOM = BASE_Y
 RAIN_SPAN = RAIN_TOP - RAIN_BOTTOM
 RAIN_SPEED = 4.2  # world units per second
+
+# Surrounding hillside. Large enough to reach past the far clip at every
+# allowed zoom, so the horizon is land rather than sky under the block.
+GROUND_EXTENT = 46.0
+GROUND_GRID = 24
+# The setting is a terraced hillside, so the far field should fall away rather
+# than sit flat. A flat plane puts the horizon at eye level and leaves almost no
+# sky in frame.
+GROUND_DROP = 17.0
+GROUND_RGB = (0.33, 0.39, 0.21)
+GROUND_FAR_RGB = (0.30, 0.34, 0.26)
+
+# Directional shadow map. 2048 is plenty for a 7x4 m block and costs one extra
+# geometry pass; the M-series GPU does not notice it.
+SHADOW_SIZE = 2048
+SHADOW_HALF_EXTENT = 5.6   # orthographic half-box, covers the block plus crops
+SHADOW_LIGHT_DISTANCE = 12.0
+# Hemispheric ambient. Sky tint from above, warm soil bounce from below.
+AMBIENT_SKY_RGB = (0.42, 0.47, 0.56)
+AMBIENT_GROUND_RGB = (0.36, 0.28, 0.20)
+AMBIENT_SKY_WET_RGB = (0.40, 0.43, 0.47)
+AMBIENT_GROUND_WET_RGB = (0.28, 0.24, 0.20)
+# Dim counter-light opposite the sun. Without it the shaded skirt reads as a
+# hole rather than as a wall in shade.
+FILL_COLOUR_RGB = (0.20, 0.22, 0.26)
+FILL_COLOUR_WET_RGB = (0.16, 0.17, 0.19)
+# Colour flashed over the bench the agent is acting on. Naming the action in
+# the HUD tells you what it did; tinting the bench tells you where, which is the
+# part a viewer cannot otherwise work out from a wall of numbers.
+ACTION_TINTS = {
+    "IRRIGATE": (0.30, 0.62, 0.95),
+    "APPLY": (0.96, 0.74, 0.26),
+    "SPRAY": (0.92, 0.38, 0.34),
+    "HIRE": (0.94, 0.86, 0.32),
+    "HARVEST": (0.36, 0.88, 0.42),
+    "SCOUT": (0.86, 0.90, 0.96),
+}
+
+# Foliage wrap. Soil is opaque, leaves transmit, so they get a softer terminator.
+WRAP_SOIL = 0.0
+WRAP_FOLIAGE = 0.55
 
 HUD_SIZE = (984, 210)
 # Per-zone panel on the right of the HUD. Without it the four benches are only
@@ -107,33 +148,111 @@ layout (location = 3) in vec3 in_colour;
 layout (location = 4) in float in_scale;
 
 uniform mat4 u_view_proj;
+uniform mat4 u_light_view_proj;
 
 out vec3 v_normal;
 out vec3 v_colour;
+out vec3 v_world;
+out vec4 v_light_space;
 
 void main() {
     vec3 world = in_pos * vec3(1.0, in_scale, 1.0) + in_offset;
     gl_Position = u_view_proj * vec4(world, 1.0);
-    v_normal = in_normal;
+    // Instances are scaled in y only, so the correct normal transform is the
+    // inverse scale on that axis. Without it a tall plant shades like a short
+    // one and the canopy reads flat.
+    float s = max(in_scale, 1e-4);
+    v_normal = normalize(vec3(in_normal.x, in_normal.y / s, in_normal.z));
     v_colour = in_colour;
+    v_world = world;
+    v_light_space = u_light_view_proj * vec4(world, 1.0);
 }
 """
 
 MESH_FRAGMENT_SHADER = """#version 410 core
 in vec3 v_normal;
 in vec3 v_colour;
+in vec3 v_world;
+in vec4 v_light_space;
 
-uniform vec3 u_light_dir;
+uniform vec3 u_light_dir;       // direction the light travels
 uniform vec3 u_light_colour;
+uniform vec3 u_fill_dir;        // dim counter-light, no shadow
+uniform vec3 u_fill_colour;
+uniform vec3 u_sky_colour;      // hemispheric ambient from above
+uniform vec3 u_ground_colour;   // warm bounce off the soil below
+uniform vec3 u_eye;
 uniform float u_unlit;
+uniform float u_wrap;           // 0 for soil, higher for foliage
+uniform float u_shadow_on;
+uniform sampler2D u_shadow_map;
 
 out vec4 frag_colour;
 
-void main() {
-    float lambert = max(dot(normalize(v_normal), normalize(-u_light_dir)), 0.0);
-    vec3 lit = v_colour * (0.42 + 0.58 * lambert) * u_light_colour;
-    frag_colour = vec4(mix(lit, v_colour, u_unlit), 1.0);
+float shadow_lit(vec4 light_space, float ndl) {
+    vec3 proj = light_space.xyz / light_space.w * 0.5 + 0.5;
+    if (proj.z > 1.0 || any(lessThan(proj.xy, vec2(0.0))) ||
+        any(greaterThan(proj.xy, vec2(1.0)))) {
+        return 1.0;
+    }
+    // Slope-scaled bias: surfaces edge-on to the sun need the most, and a flat
+    // constant either shadow-acnes the terraces or peter-pans the plants.
+    float bias = max(0.0022 * (1.0 - ndl), 0.0005);
+    vec2 texel = 1.0 / vec2(textureSize(u_shadow_map, 0));
+    float lit = 0.0;
+    for (int x = -1; x <= 1; ++x) {
+        for (int y = -1; y <= 1; ++y) {
+            float depth = texture(u_shadow_map, proj.xy + vec2(x, y) * texel).r;
+            lit += (proj.z - bias) > depth ? 0.0 : 1.0;
+        }
+    }
+    return lit / 9.0;
 }
+
+void main() {
+    vec3 n = normalize(v_normal);
+    vec3 l = normalize(-u_light_dir);
+    float ndl = dot(n, l);
+
+    // Wrapped diffuse. Leaves transmit light, so the shaded side of the canopy
+    // should stay green rather than going black the way bare soil does.
+    float diffuse = max((ndl + u_wrap) / (1.0 + u_wrap), 0.0);
+    float lit = u_shadow_on > 0.5 ? shadow_lit(v_light_space, ndl) : 1.0;
+    diffuse *= mix(0.25, 1.0, lit);
+
+    // Hemispheric ambient rather than a flat constant: sky light from above,
+    // warm bounce off the soil from below. This is most of the difference
+    // between looking like plastic and looking like a field.
+    vec3 ambient = mix(u_ground_colour, u_sky_colour, 0.5 + 0.5 * n.y);
+
+    // Counter-light is unshadowed on purpose: it stands in for bounced sky,
+    // which does not come from a single blockable direction.
+    float fill = max(dot(n, normalize(-u_fill_dir)), 0.0);
+    vec3 shaded = v_colour * (ambient + u_light_colour * diffuse + u_fill_colour * fill);
+
+    // Rim light lifts the silhouette off the sky.
+    vec3 view = normalize(u_eye - v_world);
+    shaded += u_sky_colour * pow(1.0 - max(dot(n, view), 0.0), 3.0) * 0.18;
+
+    frag_colour = vec4(mix(shaded, v_colour, u_unlit), 1.0);
+}
+"""
+
+# Depth-only pass that fills the shadow map. Mirrors the instancing maths in the
+# mesh vertex shader so casters land exactly where the main pass draws them.
+DEPTH_VERTEX_SHADER = """#version 410 core
+layout (location = 0) in vec3 in_pos;
+layout (location = 2) in vec3 in_offset;
+layout (location = 4) in float in_scale;
+uniform mat4 u_light_view_proj;
+void main() {
+    vec3 world = in_pos * vec3(1.0, in_scale, 1.0) + in_offset;
+    gl_Position = u_light_view_proj * vec4(world, 1.0);
+}
+"""
+
+DEPTH_FRAGMENT_SHADER = """#version 410 core
+void main() { }
 """
 
 SCREEN_VERTEX_SHADER = """#version 410 core
@@ -346,6 +465,65 @@ def _build_terrain():
     return vao, len(index_array), colour_vbo, tint, n_surface
 
 
+def _build_ground():
+    """Surrounding hillside the block sits on.
+
+    Without it the terraces hang in an empty sky, which is the single thing that
+    most made the render look unfinished. It is a coarse grid rather than one
+    quad so the vertex colours can fall off towards the horizon and the block
+    reads as part of a larger slope.
+    """
+    import OpenGL.GL as gl
+
+    n = GROUND_GRID
+    span = GROUND_EXTENT
+    cx, cz = TOTAL_WIDTH * 0.5, TOTAL_DEPTH * 0.5
+    xs = np.linspace(cx - span, cx + span, n + 1, dtype=np.float32)
+    zs = np.linspace(cz - span, cz + span, n + 1, dtype=np.float32)
+
+    rng = np.random.default_rng(4242)
+    positions, colours = [], []
+    for z in zs:
+        for x in xs:
+            # Dish the far field downwards so the horizon sits below the block
+            # and the terraces stay the highest thing in frame.
+            r = np.hypot(x - cx, z - cz)
+            t = min(max(r - 3.2, 0.0) / span, 1.0)
+            drop = GROUND_DROP * t**1.5
+            # Gentle undulation so the slope is not a machined cone.
+            bump = 0.34 * np.sin(x * 0.31) * np.cos(z * 0.27) * min(t * 3.0, 1.0)
+            positions.append((x, BASE_Y - 0.02 - drop + bump, z))
+            far = _lerp_rgb(GROUND_RGB, GROUND_FAR_RGB, t)
+            shade = 1.0 - 0.18 * t + rng.normal(0.0, 0.035)
+            colours.append(tuple(c * shade for c in far))
+
+    idx = []
+    stride = n + 1
+    for row in range(n):
+        for col in range(n):
+            a = row * stride + col
+            idx += [a, a + stride, a + 1, a + 1, a + stride, a + stride + 1]
+
+    positions = np.asarray(positions, dtype=np.float32)
+    colours = np.asarray(colours, dtype=np.float32)
+    index_array = np.asarray(idx, dtype=np.uint32)
+    normals = _vertex_normals(positions, index_array.reshape(-1, 3))
+
+    vao = gl.glGenVertexArrays(1)
+    gl.glBindVertexArray(vao)
+    _static_attrib(0, positions)
+    _static_attrib(1, normals)
+    _static_attrib(3, colours)
+    _instanced_attrib(2, np.zeros((1, 3), dtype=np.float32))
+    _instanced_attrib(4, np.ones((1, 1), dtype=np.float32))
+
+    ebo = gl.glGenBuffers(1)
+    gl.glBindBuffer(gl.GL_ELEMENT_ARRAY_BUFFER, ebo)
+    gl.glBufferData(gl.GL_ELEMENT_ARRAY_BUFFER, index_array.nbytes, index_array, gl.GL_STATIC_DRAW)
+    gl.glBindVertexArray(0)
+    return vao, len(index_array)
+
+
 def _cone_mesh(radius: float, segments: int = 7) -> tuple[np.ndarray, np.ndarray]:
     """Unit-height cone as a triangle soup. Scaled per instance in the shader."""
     verts: list[tuple[float, float, float]] = []
@@ -433,6 +611,48 @@ def _instanced_attrib(location: int, data: np.ndarray):
 # ---------------------------------------------------------------------------
 
 
+def _orthographic(half: float, near: float, far: float) -> np.ndarray:
+    """Symmetric orthographic box, used for the directional light's projection."""
+    m = np.identity(4, dtype=np.float32)
+    m[0, 0] = 1.0 / half
+    m[1, 1] = 1.0 / half
+    m[2, 2] = -2.0 / (far - near)
+    m[2, 3] = -(far + near) / (far - near)
+    return m
+
+
+def _build_shadow_map(size: int):
+    """Depth-only framebuffer for the directional shadow pass.
+
+    Border colour is white so anything sampling outside the light's box reads as
+    fully lit rather than dropping into a black slab.
+    """
+    import OpenGL.GL as gl
+
+    tex = gl.glGenTextures(1)
+    gl.glBindTexture(gl.GL_TEXTURE_2D, tex)
+    gl.glTexImage2D(
+        gl.GL_TEXTURE_2D, 0, gl.GL_DEPTH_COMPONENT24, size, size, 0,
+        gl.GL_DEPTH_COMPONENT, gl.GL_FLOAT, None,
+    )
+    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
+    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
+    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_BORDER)
+    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_BORDER)
+    gl.glTexParameterfv(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_BORDER_COLOR, [1.0, 1.0, 1.0, 1.0])
+
+    fbo = gl.glGenFramebuffers(1)
+    gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, fbo)
+    gl.glFramebufferTexture2D(
+        gl.GL_FRAMEBUFFER, gl.GL_DEPTH_ATTACHMENT, gl.GL_TEXTURE_2D, tex, 0
+    )
+    gl.glDrawBuffer(gl.GL_NONE)
+    gl.glReadBuffer(gl.GL_NONE)
+    complete = gl.glCheckFramebufferStatus(gl.GL_FRAMEBUFFER) == gl.GL_FRAMEBUFFER_COMPLETE
+    gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0)
+    return (fbo, tex) if complete else (None, None)
+
+
 def _perspective(fov_y: float, aspect: float, near: float, far: float) -> np.ndarray:
     f = 1.0 / np.tan(np.radians(fov_y) / 2.0)
     m = np.zeros((4, 4), dtype=np.float32)
@@ -503,6 +723,7 @@ class BlockRenderer:
         gl.glEnable(gl.GL_MULTISAMPLE)
 
         self._mesh_program = _link_program(MESH_VERTEX_SHADER, MESH_FRAGMENT_SHADER)
+        self._depth_program = _link_program(DEPTH_VERTEX_SHADER, DEPTH_FRAGMENT_SHADER)
         self._sky_program = _link_program(SCREEN_VERTEX_SHADER, SKY_FRAGMENT_SHADER)
         self._hud_program = _link_program(SCREEN_VERTEX_SHADER, HUD_FRAGMENT_SHADER)
 
@@ -522,10 +743,15 @@ class BlockRenderer:
         self._rain_vao, self._rain_vertices = rain[0], rain[1]
         self._rain_offsets, self._rain_colours, self._rain_scales = rain[2], rain[3], rain[4]
 
+        self._ground_vao, self._ground_indices = _build_ground()
         self._sky_vao = _build_screen_quad(-1.0, -1.0, 1.0, 1.0)
         self._hud_vao = self._build_hud_quad()
         self._hud_texture = gl.glGenTextures(1)
         self._hud_key: tuple | None = None
+        # If the depth framebuffer will not complete, carry on unshadowed rather
+        # than failing to open a window at all.
+        self._shadow_fbo, self._shadow_tex = _build_shadow_map(SHADOW_SIZE)
+        self._light_view_proj = np.identity(4, dtype=np.float32)
         self._font = None
         self._font_bold = None
 
@@ -535,6 +761,12 @@ class BlockRenderer:
 
         # Placement is fixed for the whole episode so plants do not teleport
         # between frames; only height and colour track the zone state.
+        self._soil_mottle = self._soil_mottle_field()
+        # Fixed per-plant variation. A stand where every plant is the identical
+        # height and shade reads as a texture swatch, not as a crop.
+        _plant_rng = np.random.default_rng(90210)
+        self._crop_jitter = _plant_rng.uniform(0.82, 1.18, 4 * CROP_PER_ZONE).astype(np.float32)
+        self._crop_shade = _plant_rng.uniform(0.86, 1.12, (4 * CROP_PER_ZONE, 1)).astype(np.float32)
         self._crop_xz = self._crop_row_positions()
         self._rain_seed = self._rain_start_positions()
         self._start_ticks = pygame.time.get_ticks()
@@ -551,8 +783,8 @@ class BlockRenderer:
         bottom = top - 2.0 * HUD_SIZE[1] / h
         return _build_screen_quad(left, bottom, right, top)
 
-    def _view_projection(self) -> np.ndarray:
-        proj = _perspective(40.0, self.size[0] / self.size[1], 0.5, 80.0)
+    def _camera_eye(self) -> np.ndarray:
+        """World-space camera position for the current orbit angles."""
         target = np.asarray(CAMERA_TARGET, dtype=np.float32)
         az, el = np.radians(self._azimuth), np.radians(self._elevation)
         offset = np.array(
@@ -563,8 +795,30 @@ class BlockRenderer:
             ],
             dtype=np.float32,
         )
-        view = _look_at(target + offset, target, np.array([0.0, 1.0, 0.0], dtype=np.float32))
+        return target + offset
+
+    def _view_projection(self) -> np.ndarray:
+        proj = _perspective(40.0, self.size[0] / self.size[1], 0.5, 200.0)
+        target = np.asarray(CAMERA_TARGET, dtype=np.float32)
+        view = _look_at(
+            self._camera_eye(), target, np.array([0.0, 1.0, 0.0], dtype=np.float32)
+        )
         return (proj @ view).astype(np.float32)
+
+    def _soil_mottle_field(self) -> np.ndarray:
+        """Fixed per-vertex brightness jitter, so soil is not one flat colour."""
+        rng = np.random.default_rng(20260731)
+        n = len(self._terrain_tint)
+        stride = TERRAIN_COLS + 1
+        rows = np.arange(n) // stride
+        cols = np.arange(n) % stride
+        # Two octaves of smooth variation plus a little grain.
+        field = (
+            0.055 * np.sin(cols * 0.42) * np.cos(rows * 0.61)
+            + 0.035 * np.sin(cols * 1.19 + 2.0) * np.cos(rows * 1.47 + 1.0)
+            + rng.normal(0.0, 0.018, n)
+        )
+        return (1.0 + field).astype(np.float32)
 
     def _crop_row_positions(self) -> np.ndarray:
         """Plants laid out in rows along each bench, with a little jitter."""
@@ -697,31 +951,111 @@ class BlockRenderer:
         gl.glDepthMask(gl.GL_TRUE)
         gl.glEnable(gl.GL_DEPTH_TEST)
 
+    def _sun_direction(self, state: dict[str, Any]) -> np.ndarray:
+        """Direction the sunlight travels, swinging west across the season.
+
+        Tying it to the day rather than pinning it means the shadows rotate as
+        an episode plays, which reads as time passing without any extra UI.
+        """
+        day = float(state.get("day", 0))
+        horizon = max(float(state.get("horizon", 120)), 1.0)
+        # Keep the sun well up: a low sun throws shadows longer than the block.
+        azimuth = np.radians(38.0 + 84.0 * min(day / horizon, 1.0))
+        elevation = np.radians(58.0)
+        d = np.array(
+            [np.cos(elevation) * np.sin(azimuth), -np.sin(elevation),
+             np.cos(elevation) * np.cos(azimuth)],
+            dtype=np.float32,
+        )
+        return d / np.linalg.norm(d)
+
+    def _light_view_projection(self, sun_dir: np.ndarray) -> np.ndarray:
+        centre = np.array([TOTAL_WIDTH * 0.5, 0.45, TOTAL_DEPTH * 0.5], dtype=np.float32)
+        eye = centre - sun_dir * SHADOW_LIGHT_DISTANCE
+        view = _look_at(eye, centre, np.array([0.0, 1.0, 0.0], dtype=np.float32))
+        proj = _orthographic(SHADOW_HALF_EXTENT, 0.1, SHADOW_LIGHT_DISTANCE * 2.2)
+        return (proj @ view).astype(np.float32)
+
+    def _shadow_pass(self) -> None:
+        """Render terrain and crops into the depth map from the light's view.
+
+        Rain is deliberately not a caster: 220 falling needles would stipple the
+        whole block with noise for no readable gain.
+        """
+        import OpenGL.GL as gl
+
+        gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, self._shadow_fbo)
+        gl.glViewport(0, 0, SHADOW_SIZE, SHADOW_SIZE)
+        gl.glClear(gl.GL_DEPTH_BUFFER_BIT)
+        gl.glUseProgram(self._depth_program)
+        gl.glUniformMatrix4fv(
+            gl.glGetUniformLocation(self._depth_program, "u_light_view_proj"),
+            1, gl.GL_TRUE, self._light_view_proj,
+        )
+        gl.glBindVertexArray(self._terrain_vao)
+        gl.glDrawElementsInstanced(
+            gl.GL_TRIANGLES, self._terrain_indices, gl.GL_UNSIGNED_INT, None, 1
+        )
+        gl.glBindVertexArray(self._crop_vao)
+        gl.glDrawArraysInstanced(gl.GL_TRIANGLES, 0, self._crop_vertices, 4 * CROP_PER_ZONE)
+        gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0)
+        gl.glViewport(0, 0, self.size[0], self.size[1])
+
     def _draw_scene(self, state: dict[str, Any], raining: bool) -> None:
         import OpenGL.GL as gl
 
+        # Buffers first: both passes draw the same instance data, so uploading
+        # once keeps the depth map and the colour pass exactly in step.
+        self._upload_terrain_colours(state)
+        self._upload_crop(state)
+        drops = self._upload_rain(state)
+
+        sun = self._sun_direction(state)
+        shadows = self._shadow_fbo is not None
+        if shadows:
+            self._light_view_proj = self._light_view_projection(sun)
+            self._shadow_pass()
+
         program = self._mesh_program
         gl.glUseProgram(program)
-        gl.glUniformMatrix4fv(
-            gl.glGetUniformLocation(program, "u_view_proj"), 1, gl.GL_TRUE, self._view_proj
-        )
-        gl.glUniform3f(gl.glGetUniformLocation(program, "u_light_dir"), 0.55, -1.0, 0.42)
-        light = (0.76, 0.80, 0.86) if raining else (1.0, 0.96, 0.88)
-        gl.glUniform3f(gl.glGetUniformLocation(program, "u_light_colour"), *light)
-        unlit = gl.glGetUniformLocation(program, "u_unlit")
+        loc = lambda name: gl.glGetUniformLocation(program, name)  # noqa: E731
+        gl.glUniformMatrix4fv(loc("u_view_proj"), 1, gl.GL_TRUE, self._view_proj)
+        gl.glUniformMatrix4fv(loc("u_light_view_proj"), 1, gl.GL_TRUE, self._light_view_proj)
+        gl.glUniform3f(loc("u_light_dir"), *sun)
+        gl.glUniform3f(loc("u_light_colour"), *((0.54, 0.58, 0.64) if raining else (0.94, 0.88, 0.76)))
+        # Mirror the sun across the vertical axis and tilt it up slightly.
+        fill_dir = np.array([-sun[0], -0.35, -sun[2]], dtype=np.float32)
+        gl.glUniform3f(loc("u_fill_dir"), *(fill_dir / np.linalg.norm(fill_dir)))
+        gl.glUniform3f(loc("u_fill_colour"), *(FILL_COLOUR_WET_RGB if raining else FILL_COLOUR_RGB))
+        sky = AMBIENT_SKY_WET_RGB if raining else AMBIENT_SKY_RGB
+        ground = AMBIENT_GROUND_WET_RGB if raining else AMBIENT_GROUND_RGB
+        gl.glUniform3f(loc("u_sky_colour"), *sky)
+        gl.glUniform3f(loc("u_ground_colour"), *ground)
+        gl.glUniform3f(loc("u_eye"), *self._camera_eye())
+        gl.glUniform1f(loc("u_shadow_on"), 1.0 if shadows else 0.0)
+        if shadows:
+            gl.glActiveTexture(gl.GL_TEXTURE1)
+            gl.glBindTexture(gl.GL_TEXTURE_2D, self._shadow_tex)
+            gl.glUniform1i(loc("u_shadow_map"), 1)
+        unlit = loc("u_unlit")
+        wrap = loc("u_wrap")
         gl.glUniform1f(unlit, 0.0)
 
-        self._upload_terrain_colours(state)
+        gl.glUniform1f(wrap, WRAP_SOIL)
+        gl.glBindVertexArray(self._ground_vao)
+        gl.glDrawElementsInstanced(
+            gl.GL_TRIANGLES, self._ground_indices, gl.GL_UNSIGNED_INT, None, 1
+        )
         gl.glBindVertexArray(self._terrain_vao)
         gl.glDrawElementsInstanced(
             gl.GL_TRIANGLES, self._terrain_indices, gl.GL_UNSIGNED_INT, None, 1
         )
 
-        self._upload_crop(state)
+        gl.glUniform1f(wrap, WRAP_FOLIAGE)
         gl.glBindVertexArray(self._crop_vao)
         gl.glDrawArraysInstanced(gl.GL_TRIANGLES, 0, self._crop_vertices, 4 * CROP_PER_ZONE)
+        gl.glUniform1f(wrap, WRAP_SOIL)
 
-        drops = self._upload_rain(state)
         if drops:
             # Rain is drawn unlit so drops stay bright against dark wet soil.
             gl.glUniform1f(unlit, 1.0)
@@ -740,6 +1074,23 @@ class BlockRenderer:
             colours[row * stride : (row + 1) * stride] = rgb
         # The extruded sides are subsoil, not topsoil, so they stay constant.
         colours[self._terrain_surface_vertices :] = SUBSOIL_RGB
+
+        # Mottling. Uniform soil is the strongest tell that a render is
+        # synthetic, and the pattern is fixed per vertex so it does not crawl.
+        colours *= self._soil_mottle[:, None]
+
+        zones, highlight = _action_target(state.get("action", ""))
+        if zones and highlight is not None:
+            pulse = 0.5 + 0.5 * np.sin(self._elapsed_seconds() * 5.0)
+            # The flash answers "which bench", so a block-wide action barely
+            # needs it. Tinting all four hard just recolours the whole frame and
+            # hides the soil moisture the rest of the render is trying to show.
+            strength = (0.28 + 0.30 * pulse) if len(zones) == 1 else (0.06 + 0.07 * pulse)
+            for z in zones:
+                lo, hi = z * ROWS_PER_ZONE, min((z + 1) * ROWS_PER_ZONE + 1, TERRAIN_ROWS + 1)
+                block = colours[lo * stride : hi * stride]
+                block += (np.asarray(highlight, dtype=np.float32) - block) * strength
+
         colours *= self._terrain_tint[:, None]
         np.clip(colours, 0.0, 1.0, out=colours)
 
@@ -777,10 +1128,12 @@ class BlockRenderer:
                 # Square root, not linear: canopy spends most of the season
                 # below 0.5, and a linear map renders that as invisible specks.
                 grown = CROP_MIN_HEIGHT + (CROP_MAX_HEIGHT - CROP_MIN_HEIGHT) * canopy**0.5
-                scales[idx] = 0.0 if picked else grown
+                scales[idx] = 0.0 if picked else grown * self._crop_jitter[idx]
 
         gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self._crop_offsets)
         gl.glBufferSubData(gl.GL_ARRAY_BUFFER, 0, offsets.nbytes, offsets)
+        colours *= self._crop_shade
+        np.clip(colours, 0.0, 1.0, out=colours)
         gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self._crop_colours)
         gl.glBufferSubData(gl.GL_ARRAY_BUFFER, 0, colours.nbytes, colours)
         gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self._crop_scales)
@@ -1028,6 +1381,24 @@ class BlockRenderer:
                 pygame.draw.rect(
                     surface, (86, 98, 112), (bx, by, ZONE_BAR_W, ZONE_BAR_H), 1
                 )
+
+
+def _action_target(action: str) -> tuple[tuple[int, ...], tuple[float, float, float] | None]:
+    """Which benches an action touches, and the colour to flash over them.
+
+    Parsed from the action name rather than plumbed through the environment, so
+    the renderer stays a pure consumer of the published state dict.
+    """
+    if not action or action == "IDLE":
+        return (), None
+    verb = action.split("_")[0]
+    tint = ACTION_TINTS.get(verb)
+    if tint is None:
+        return (), None
+    for z in range(4):
+        if f"Z{z}" in action:
+            return (z,), tint
+    return (0, 1, 2, 3), tint
 
 
 def _zone_wetness(state: dict[str, Any]) -> list[float]:
