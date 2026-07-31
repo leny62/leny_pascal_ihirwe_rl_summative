@@ -28,6 +28,9 @@ SUBSOIL_RGB = (0.44, 0.32, 0.22)
 CROP_HEALTHY_RGB = (0.22, 0.55, 0.18)
 CROP_STRESSED_RGB = (0.78, 0.74, 0.26)
 RAIN_RGB = (0.72, 0.85, 0.98)
+# Spent haulm after the pods are picked. Straw, and shorter than a standing crop.
+CROP_PICKED_RGB = (0.62, 0.55, 0.30)
+CROP_PICKED_SCALE = 0.45
 
 SKY_ZENITH_RGB = (0.24, 0.45, 0.72)
 SKY_HORIZON_RGB = (0.68, 0.80, 0.90)
@@ -121,6 +124,15 @@ ZONE_BAR_GAP = 15
 ZONE_ROW_H = 30
 ZONE_LABELS = ("Z0 ridge", "Z1", "Z2", "Z3 valley")
 HUD_MARGIN = 14
+# Rolling strip of the agent's last decisions. The single "Action" line only
+# ever shows one day, which makes a policy look static; the ribbon shows that
+# choices are being made continuously and how they cluster.
+HISTORY_LEN = 46
+HISTORY_X = 578
+HISTORY_Y = 176
+HISTORY_CELL_W = 8
+HISTORY_CELL_H = 15
+HISTORY_GAP = 1
 
 HUD_TEXT_RGB = (208, 216, 224)
 HUD_BRIGHT_RGB = (238, 242, 246)
@@ -748,6 +760,8 @@ class BlockRenderer:
         self._hud_vao = self._build_hud_quad()
         self._hud_texture = gl.glGenTextures(1)
         self._hud_key: tuple | None = None
+        self._history: list[str] = []
+        self._history_day: int | None = None
         # If the depth framebuffer will not complete, carry on unshadowed rather
         # than failing to open a window at all.
         self._shadow_fbo, self._shadow_tex = _build_shadow_map(SHADOW_SIZE)
@@ -1122,13 +1136,20 @@ class BlockRenderer:
                 idx = start + slot
                 x, z = self._crop_xz[idx]
                 offsets[idx] = (x, bench_y, z)
-                colours[idx] = colour
-                # Harvest clears plants progressively rather than all at once.
-                picked = slot < lifted_per_zone
                 # Square root, not linear: canopy spends most of the season
                 # below 0.5, and a linear map renders that as invisible specks.
                 grown = CROP_MIN_HEIGHT + (CROP_MAX_HEIGHT - CROP_MIN_HEIGHT) * canopy**0.5
-                scales[idx] = 0.0 if picked else grown * self._crop_jitter[idx]
+                # Harvest clears plants progressively rather than all at once.
+                # Picking takes the pods, not the plant: the environment still
+                # reports canopy near 0.5 after a full harvest, so removing the
+                # geometry outright left a bare block contradicting its own HUD.
+                # Spent haulm stays standing, shorter and straw coloured.
+                if slot < lifted_per_zone:
+                    colours[idx] = CROP_PICKED_RGB
+                    scales[idx] = grown * CROP_PICKED_SCALE * self._crop_jitter[idx]
+                else:
+                    colours[idx] = colour
+                    scales[idx] = grown * self._crop_jitter[idx]
 
         gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self._crop_offsets)
         gl.glBufferSubData(gl.GL_ARRAY_BUFFER, 0, offsets.nbytes, offsets)
@@ -1202,6 +1223,9 @@ class BlockRenderer:
         import OpenGL.GL as gl
         import pygame
 
+        # Before the cache key, so a new day's action is in the ribbon by the
+        # time the key changes and triggers the rebuild.
+        self._record_action(state)
         key = self._hud_cache_key(state)
         gl.glActiveTexture(gl.GL_TEXTURE0)
         gl.glBindTexture(gl.GL_TEXTURE_2D, self._hud_texture)
@@ -1246,6 +1270,43 @@ class BlockRenderer:
                 for z in zones
             ),
         )
+
+    def _record_action(self, state: dict[str, Any]) -> None:
+        """Append today's action to the rolling history, once per simulated day."""
+        day = state.get("day")
+        if day is None or day == self._history_day:
+            return
+        self._history_day = day
+        self._history.append(str(state.get("action", "IDLE")))
+        del self._history[:-HISTORY_LEN]
+
+    def _draw_history(self, surface) -> None:
+        """Ribbon of recent decisions, newest on the right.
+
+        Each cell is one day, coloured by the same key the block flashes with,
+        so the strip and the 3D view tell the same story.
+        """
+        import pygame
+
+        label = self._font_small.render("RECENT DECISIONS", True, HUD_DIM_RGB)
+        surface.blit(label, (HISTORY_X, HISTORY_Y - 15))
+        step = HISTORY_CELL_W + HISTORY_GAP
+        for i, action in enumerate(self._history[-HISTORY_LEN:]):
+            _, tint = _action_target(action)
+            rgb = (
+                tuple(int(255 * c) for c in tint) if tint else (74, 86, 100)
+            )
+            pygame.draw.rect(
+                surface, rgb,
+                pygame.Rect(HISTORY_X + i * step, HISTORY_Y, HISTORY_CELL_W, HISTORY_CELL_H),
+            )
+        # Mark the newest cell so the eye knows which end is now.
+        if self._history:
+            x = HISTORY_X + (len(self._history[-HISTORY_LEN:]) - 1) * step
+            pygame.draw.rect(
+                surface, HUD_BRIGHT_RGB,
+                pygame.Rect(x, HISTORY_Y + HISTORY_CELL_H + 1, HISTORY_CELL_W, 2),
+            )
 
     def _build_hud(self, state: dict[str, Any]):
         """Text overlay. Pre-harvest interval line goes red inside the window,
@@ -1326,6 +1387,7 @@ class BlockRenderer:
             y += 21
 
         self._draw_zone_panel(surface, state)
+        self._draw_history(surface)
 
         if self.render_mode == "human":
             surface.blit(
