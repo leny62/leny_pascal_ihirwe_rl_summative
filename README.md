@@ -7,8 +7,8 @@ hillside, and a comparison of four RL methods trained against it.
 **Course:** Machine Learning Techniques II, Summative Assignment
 **Author:** Leny Pascal Ihirwe
 
-Report: `docs/report.pdf`
-Video: TODO add link
+Report: [Report](https://docs.google.com/document/d/1s_DMaKDej38lyw0hKZn0jrFKVR5mTO_mWzu-sYL3Cxk/edit?usp=sharing)
+Video: [Demo Video](https://drive.google.com/file/d/1dNKVyiTZj4k9TvHRn1OpK5C5YkptukIp/view?usp=sharing)
 
 ## The problem
 
