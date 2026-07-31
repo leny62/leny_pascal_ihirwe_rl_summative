@@ -147,8 +147,10 @@ def _render_zone_grid(state: dict) -> None:
     for i, (col, zone) in enumerate(zip(cols, zones, strict=True)):
         with col:
             # Fraction of this zone's own available water, not a fixed mm scale.
-            # A deep valley bench holds several times what a thin ridge bench
-            # does, so a shared divisor makes every zone read the same.
+            # Total available water happens to be 84 mm on every bench today,
+            # because the bean root zone caps at 0.60 m and all four are deeper,
+            # but normalising per zone keeps this correct if the rooting depth
+            # or the soil depths ever change.
             depletion_frac = float(
                 zone.get("depletion_frac", min(zone.get("depletion_mm", 0) / 100.0, 1.0))
             )
